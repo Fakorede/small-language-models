@@ -107,7 +107,17 @@ class RNNModel(BaseTextGenerationModel):
 
         # Generate tokens auto regressively
         with torch.no_grad():
-            for _ in range(max_seq_length):
+            # First pass with the full prompt
+            logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
+            next_token_id = next_token.item()
+            generated_ids.append(next_token_id)
+
+            # Continue generating one token at a time
+            for _ in range(max_seq_length - 1):
+                # Create a new tensor with just the last predicted token
+                # Make it [batch_size, sequence_length] which is [1, 1]
+                input_ids = torch.tensor([[next_token_id]], dtype=torch.long).to(device)
+
                 # Forward pass
                 logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
 
@@ -118,9 +128,6 @@ class RNNModel(BaseTextGenerationModel):
                 # Check for EOS token
                 if next_token_id == tokenizer.eos_id():
                     break
-
-                # Prepare next input (only use the last predicted token)
-                input_ids = next_token.unsqueeze(0).unsqueeze(0)
 
         # Decode the generated tokens
         generated_text = tokenizer.decode(generated_ids)

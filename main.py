@@ -102,7 +102,7 @@ def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[fl
         'RNN': (rnn_train_losses, rnn_val_losses),
     }
 
-    return models, losses, test_dataloader, tokenizer
+    return models, losses #, test_dataloader, tokenizer
 
 
 def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, Any]:
