@@ -96,8 +96,11 @@ class RNNModel(BaseTextGenerationModel):
         """
         self.eval()
         device = next(self.parameters()).device
+
+        print(f"Tokenizing prompt: '{prompt_text}'")
         prompt_ids = tokenizer.encode(prompt_text, out_type=int)
         input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0).to(device)
+        print(f"Prompt token IDs: {prompt_ids}")
 
         # Initialize hidden state
         hidden = None
@@ -107,29 +110,27 @@ class RNNModel(BaseTextGenerationModel):
 
         # Generate tokens auto regressively
         with torch.no_grad():
-            # First pass with the full prompt
-            logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
-            next_token_id = next_token.item()
-            generated_ids.append(next_token_id)
-
-            # Continue generating one token at a time
-            for _ in range(max_seq_length - 1):
-                # Create a new tensor with just the last predicted token
-                # Make it [batch_size, sequence_length] which is [1, 1]
-                input_ids = torch.tensor([[next_token_id]], dtype=torch.long).to(device)
-
+            for i in range(max_seq_length):
                 # Forward pass
                 logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
 
                 # Get the next token
                 next_token_id = next_token.item()
+                print(f"Generated token {i}: ID={next_token_id}")
+
                 generated_ids.append(next_token_id)
 
                 # Check for EOS token
                 if next_token_id == tokenizer.eos_id():
+                    print("EOS token generated, stopping generation")
                     break
 
+                # Prepare next input (only use the last predicted token)
+                input_ids = next_token.unsqueeze(0).unsqueeze(0)
+
         # Decode the generated tokens
+        print(f"Generated IDs: {generated_ids}")
         generated_text = tokenizer.decode(generated_ids)
+        print(f"Decoded text: '{generated_text}'")
 
         return generated_text
