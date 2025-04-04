@@ -9,7 +9,7 @@ DATA_DIR = "data"
 RAW_DIR = os.path.join(DATA_DIR, "raw")
 TRAIN_FILE = os.path.join(DATA_DIR, "train.jsonl")
 TEST_FILE = os.path.join(DATA_DIR, "test.jsonl")
-MODEL_DIR = "src/models"
+MODEL_DIR = "models"
 PLOT_DIR = "plots"
 TOKENIZER_MODEL_PREFIX = os.path.join(DATA_DIR, "tokenizer")
 

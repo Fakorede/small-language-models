@@ -62,7 +62,7 @@ def train_tokenizer(
 
     # Load the trained tokenizer
     sp = spm.SentencePieceProcessor()
-    sp.Load(f"{model_prefix}.model")
+    sp.load(f"{model_prefix}.model")
     return sp
 
 
@@ -90,7 +90,7 @@ def load_or_train_tokenizer(
     if os.path.exists(model_path) and not force_retrain:
         print(f"Loading existing tokenizer from {model_path}")
         sp = spm.SentencePieceProcessor()
-        sp.Load(model_path)
+        sp.load(model_path)
         return sp
 
     # Train new tokenizer
