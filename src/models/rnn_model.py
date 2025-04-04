@@ -108,33 +108,48 @@ class RNNModel(BaseTextGenerationModel):
         # Store generated tokens
         generated_ids = []
 
-        # Generate tokens auto regressively
+        # Generate tokens autoregressively
         with torch.no_grad():
             # First, process the entire prompt
             logits, hidden, _ = self.forward(input_ids, hidden, temperature)
-
+            
             # Then generate tokens one by one
             for i in range(max_seq_length):
-                # Get the next token prediction from the last position
-                next_token_id = torch.argmax(logits[:, -1, :], dim=-1).item()
+                # Get probability distribution
+                probs = torch.softmax(logits[0, -1, :], dim=-1)
+                
+                # Set probability of padding token to zero to avoid generating it
+                probs[0] = 0
+                
+                # Renormalize probabilities
+                probs = probs / probs.sum()
+                
+                # Sample from the modified distribution
+                next_token_id = torch.multinomial(probs, 1).item()
+                
                 generated_ids.append(next_token_id)
-
-                print(f"Generated token {i}: ID={next_token_id}")
-
+                
+                print(f"Generated token {i}: ID={next_token_id}, Text='{tokenizer.IdToPiece(next_token_id)}'")
+                
                 # Check for EOS token
                 if next_token_id == tokenizer.eos_id():
                     print("EOS token generated, stopping generation")
                     break
-
-                # Prepare next input - THIS IS THE FIXED PART
+                
+                # Prepare next input
                 next_input = torch.tensor([[next_token_id]], dtype=torch.long).to(device)
-
+                
                 # Forward pass with the new token
                 logits, hidden, _ = self.forward(next_input, hidden, temperature)
-
+    
         # Decode the generated tokens
-        print(f"Generated IDs: {generated_ids}")
-        generated_text = tokenizer.decode(generated_ids)
-        print(f"Decoded text: '{generated_text}'")
+        try:
+            generated_text = tokenizer.decode(generated_ids)
+            print(f"Decoded text: '{generated_text}'")
+        except Exception as e:
+            print(f"Error decoding: {e}")
+            # Try piece by piece
+            generated_text = ''.join([tokenizer.IdToPiece(id) for id in generated_ids])
+            print(f"Piece by piece decoding: '{generated_text}'")
 
         return generated_text

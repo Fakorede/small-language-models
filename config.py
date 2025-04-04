@@ -19,7 +19,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Data preprocessing
 VOCAB_SIZE = 10000
 MAX_SEQ_LENGTH = 512
-TRAIN_VAL_SPLIT = 0.1  # 10% of training data used for validation
+TRAIN_VAL_SPLIT = 0.2  # 10% of training data used for validation
 
 # Model parameters
 EMBEDDING_DIM = 256
@@ -34,13 +34,13 @@ DROPOUT = 0.2
 BATCH_SIZE = 128
 NUM_EPOCHS = 30
 LEARNING_RATE = 0.01
-EARLY_STOPPING_PATIENCE = 3
+EARLY_STOPPING_PATIENCE = 5
 LR_SCHEDULER_FACTOR = 0.5
 LR_SCHEDULER_PATIENCE = 1
 
 # Generation parameters
 DEFAULT_MAX_GEN_LENGTH = 100
-DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TEMPERATURE = 0.8
 
 # Random seeds for reproducibility
 RANDOM_SEED = 42
