@@ -14,6 +14,7 @@ from src.data.tokenizer import load_or_train_tokenizer
 from src.data.dataset import create_dataloaders, read_jsonl_file
 from src.models.rnn_model import RNNModel
 from src.training.trainer import ModelTrainer
+from src.visualization.loss_plots import plot_loss_curves
 
 
 def set_seed(seed: int) -> None:
@@ -191,6 +192,15 @@ def main():
 
         # Plot loss curves
         print("\nPlotting loss curves...")
+        save_path = os.path.join(config.PLOT_DIR, "rnn_loss.png")
+        rnn_train_losses, rnn_val_losses = losses['RNN']
+
+        plot_loss_curves(
+            rnn_train_losses,
+            rnn_val_losses,
+            "RNN Model Loss",
+            save_path
+        )
 
         # Evaluate models if requested
         if args.evaluate:

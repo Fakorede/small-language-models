@@ -7,6 +7,7 @@ import os
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 
+import config
 from src.models.base_model import BaseTextGenerationModel
 
 
@@ -43,7 +44,7 @@ class ModelTrainer:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=1
+            self.optimizer, mode='min', factor=config.LR_SCHEDULER_FACTOR, patience=config.LR_SCHEDULER_PATIENCE, verbose=True
         )
 
     def train_epoch(self) -> float:
