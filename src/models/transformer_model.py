@@ -80,6 +80,8 @@ class TransformerModel(BaseTextGenerationModel):
             batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+
+        self.fc = nn.Linear(embedding_dim, vocab_size)
         
         self.dropout = nn.Dropout(dropout)
         

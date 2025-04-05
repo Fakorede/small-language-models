@@ -82,7 +82,17 @@ The data is organized into:
 To train all three models (RNN, LSTM, and Transformer):
 
 ```bash
-python main.py --train
+# Train all models
+python main.py --train --model_type 0
+
+# Train only the RNN model
+python main.py --train --model_type 1
+
+# Train only the LSTM model
+python main.py --train --model_type 2
+
+# Train only the Transformer model
+python main.py --train --model_type 3
 ```
 
 This will:
@@ -97,7 +107,8 @@ This will:
 To evaluate the trained models on the test set:
 
 ```bash
-python main.py --evaluate
+# Evaluate all the models
+python main.py --evaluate --model_type 0
 ```
 
 This will:
@@ -111,7 +122,8 @@ This will:
 To generate text from trained models:
 
 ```bash
-python main.py --generate --prompt "Your prompt here" --temperature 0.8 --max_length 100
+# Generate text using only the Transformer model
+python main.py --generate --prompt "Your prompt here" --model_type 3 --temperature 0.8 --max_length 100
 ```
 
 Additional arguments:
