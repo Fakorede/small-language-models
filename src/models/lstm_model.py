@@ -123,7 +123,7 @@ class LSTMModel(BaseTextGenerationModel):
                     break
                 
                 # Prepare next input (only use the last predicted token)
-                input_ids = next_token.unsqueeze(0).unsqueeze(0)
+                input_ids = next_token.unsqueeze(0)
         
         # Decode the generated tokens
         generated_text = tokenizer.decode(generated_ids)
