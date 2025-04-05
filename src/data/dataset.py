@@ -74,7 +74,7 @@ class TextGenerationDataset(Dataset):
             prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         else:
             # Add BOS token
-            prompt_tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt, add_special_tokens=False)
+            prompt_tokens = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt, add_special_tokens=False)
         
         # Check if completion needs EOS token
         if completion.endswith("<eos>"):
@@ -82,7 +82,7 @@ class TextGenerationDataset(Dataset):
             completion_tokens = self.tokenizer.encode(completion, add_special_tokens=False)
         else:
             # Add EOS token
-            completion_tokens = self.tokenizer.encode(completion, add_special_tokens=False) + [self.tokenizer.eos_id()]
+            completion_tokens = self.tokenizer.encode(completion, add_special_tokens=False) + [self.tokenizer.eos_id]
         
         # Combine prompt and completion tokens
         input_ids = prompt_tokens + completion_tokens

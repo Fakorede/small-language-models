@@ -222,7 +222,7 @@ class TransformerModel(BaseLanguageModel):
             prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=False)
         else:
             # Add BOS token
-            prompt_tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt_text, add_special_tokens=False)
+            prompt_tokens = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt_text, add_special_tokens=False)
         
         # Convert to tensor
         input_ids = torch.tensor([prompt_tokens], dtype=torch.long).to(device)
@@ -253,7 +253,7 @@ class TransformerModel(BaseLanguageModel):
                 all_tokens.append(next_token)
                 
                 # Stop if EOS token is generated
-                if next_token == self.tokenizer.eos_id():
+                if next_token == self.tokenizer.eos_id:
                     break
         
         # Decode generated tokens

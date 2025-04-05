@@ -122,12 +122,12 @@ class SPTokenizer:
             
         if isinstance(text, str):
             if add_special_tokens:
-                return [self.tokenizer.bos_id()] + self.tokenizer.encode(text) + [self.tokenizer.eos_id()]
+                return [self.tokenizer.bos_id] + self.tokenizer.encode(text) + [self.tokenizer.eos_id]
             else:
                 return self.tokenizer.encode(text)
         else:
             if add_special_tokens:
-                return [[self.tokenizer.bos_id()] + self.tokenizer.encode(t) + [self.tokenizer.eos_id()] for t in text]
+                return [[self.tokenizer.bos_id] + self.tokenizer.encode(t) + [self.tokenizer.eos_id] for t in text]
             else:
                 return [self.tokenizer.encode(t) for t in text]
             
@@ -190,14 +190,14 @@ class SPTokenizer:
     def bos_id(self) -> int:
         """Get the beginning-of-sequence token id."""
         if self.tokenizer is not None:
-            return self.tokenizer.bos_id()
+            return self.tokenizer.bos_id
         return 1
         
     @property
     def eos_id(self) -> int:
         """Get the end-of-sequence token id."""
         if self.tokenizer is not None:
-            return self.tokenizer.eos_id()
+            return self.tokenizer.eos_id
         return 2
         
     @property
