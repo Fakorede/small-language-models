@@ -1,158 +1,174 @@
+"""
+Dataset and dataloader implementations for the text generation task.
+"""
+
+import os
+import json
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
-import json
-import os
-from typing import Dict, List, Any, Tuple
+import torch.nn.functional as F
+from typing import Dict, List, Tuple, Optional, Union
+
+import sys
+sys.path.append("../..")
+import config
+from src.data.tokenizer import SPTokenizer
 
 
 class TextGenerationDataset(Dataset):
-    """Dataset and dataloader implementations for text generation tasks."""
-
-    def __init__(self, data: List[Dict[str, str]], tokenizer):
+    """
+    Dataset for text generation tasks with prompt-completion pairs.
+    """
+    def __init__(
+        self,
+        file_path: str,
+        tokenizer: SPTokenizer,
+        max_length: int = config.MAX_SEQ_LENGTH
+    ):
         """
         Initialize the dataset.
-
+        
         Args:
-            data: List of dictionaries with 'prompt' and 'completion' keys
-            tokenizer: SentencePiece tokenizer
+            file_path: Path to the JSONL file with prompt-completion pairs.
+            tokenizer: Tokenizer instance.
+            max_length: Maximum sequence length.
         """
-        self.data = data
+        self.file_path = file_path
         self.tokenizer = tokenizer
-
+        self.max_length = max_length
+        self.samples = []
+        
+        self._load_data()
+        
+    def _load_data(self):
+        """Load data from the JSONL file."""
+        if not os.path.exists(self.file_path):
+            raise FileNotFoundError(f"File not found: {self.file_path}")
+        
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                sample = json.loads(line.strip())
+                self.samples.append(sample)
+    
     def __len__(self) -> int:
-        return len(self.data)
-
+        """Return the number of samples in the dataset."""
+        return len(self.samples)
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Get a single item from the dataset.
-
+        Get a sample from the dataset.
+        
         Args:
-            idx: Index of the item
-
+            idx: Index of the sample.
+            
         Returns:
-            Dictionary with 'input_ids', 'target_ids', and 'input_len' keys
+            Dictionary with input_ids, attention_mask, and labels.
         """
-        item = self.data[idx]
-        prompt = item["prompt"]
-        completion = item["completion"]
-
-        # Tokenize the prompt and completion
-        prompt_ids = self.tokenizer.encode(prompt, out_type=int)
-        completion_ids = self.tokenizer.encode(completion, out_type=int)
-
-        # Convert to tensors
-        input_ids = torch.tensor(prompt_ids, dtype=torch.long)
-        target_ids = torch.tensor(completion_ids, dtype=torch.long)
-
+        sample = self.samples[idx]
+        prompt = sample["prompt"]
+        completion = sample["completion"]
+        
+        # Check if prompt already contains <bos> token
+        if prompt.startswith("<bos>"):
+            # Already has BOS token
+            prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+        else:
+            # Add BOS token
+            prompt_tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt, add_special_tokens=False)
+        
+        # Check if completion needs EOS token
+        if completion.endswith("<eos>"):
+            # Already has EOS token
+            completion_tokens = self.tokenizer.encode(completion, add_special_tokens=False)
+        else:
+            # Add EOS token
+            completion_tokens = self.tokenizer.encode(completion, add_special_tokens=False) + [self.tokenizer.eos_id()]
+        
+        # Combine prompt and completion tokens
+        input_ids = prompt_tokens + completion_tokens
+        
+        # Create labels (shifted right, -100 for prompt tokens to ignore them in loss)
+        labels = [-100] * len(prompt_tokens) + completion_tokens
+        
+        # Truncate if needed
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length]
+            labels = labels[:self.max_length]
+        
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = [1] * len(input_ids)
+        
+        # Pad if necessary
+        padding_length = self.max_length - len(input_ids)
+        if padding_length > 0:
+            input_ids = input_ids + [self.tokenizer.pad_id()] * padding_length
+            labels = labels + [-100] * padding_length
+            attention_mask = attention_mask + [0] * padding_length
+        
         return {
-            "input_ids": input_ids,
-            "target_ids": target_ids,
-            "input_len": len(input_ids)
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.float),
+            "labels": torch.tensor(labels, dtype=torch.long)
         }
 
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]], device: torch.device) -> Dict[str, torch.Tensor]:
-    """
-    Custom collate function for padding sequences.
-
-    Args:
-        batch: List of dictionaries returned by __getitem__
-        device: Device to move tensors to
-
-    Returns:
-        Dictionary with padded sequences
-    """
-    input_ids = [item["input_ids"] for item in batch]
-    target_ids = [item["target_ids"] for item in batch]
-    input_lens = [item["input_len"] for item in batch]
-
-    # Pad sequences
-    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    target_ids = pad_sequence(target_ids, batch_first=True, padding_value=0)
-
-    return {
-        "input_ids": input_ids.to(device),
-        "target_ids": target_ids.to(device),
-        "input_lens": torch.tensor(input_lens, dtype=torch.long).to(device)
-    }
-
-
-def read_jsonl_file(file_path: str) -> List[Dict[str, str]]:
-    """
-    Read data from JSONL file.
-
-    Args:
-        file_path: Path to JSONL file
-
-    Returns:
-        List of dictionaries with 'prompt' and 'completion' keys
-    """
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as file:
-        for line in file:
-            data.append(json.loads(line))
-    return data
-
-
 def create_dataloaders(
-        train_data: List[Dict[str, str]],
-        test_data: List[Dict[str, str]],
-        tokenizer,
-        batch_size: int,
-        device: torch.device,
-        val_split: float = 0.1
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    train_file: str = config.TRAIN_FILE,
+    test_file: str = config.TEST_FILE,
+    tokenizer: SPTokenizer = None,
+    batch_size: int = config.BATCH_SIZE,
+    max_length: int = config.MAX_SEQ_LENGTH,
+    num_workers: int = 4
+) -> Tuple[DataLoader, DataLoader]:
     """
-    Create train, validation, and test dataloaders.
-
+    Create training and testing dataloaders.
+    
     Args:
-        train_data: Training data
-        test_data: Testing data
-        tokenizer: SentencePiece tokenizer
-        batch_size: Batch size
-        device: Device to move tensors to
-        val_split: Fraction of training data to use for validation
-
+        train_file: Path to the training JSONL file.
+        test_file: Path to the testing JSONL file.
+        tokenizer: Tokenizer instance.
+        batch_size: Batch size.
+        max_length: Maximum sequence length.
+        num_workers: Number of workers for data loading.
+        
     Returns:
-        Tuple of (train_dataloader, val_dataloader, test_dataloader)
+        Tuple of (train_dataloader, test_dataloader).
     """
-    import random
-
-    # Create a copy of train_data to avoid modifying the original
-    train_data = train_data.copy()
-
-    # Shuffle and split training data
-    random.shuffle(train_data)
-    val_size = int(val_split * len(train_data))
-    val_data = train_data[:val_size]
-    train_data = train_data[val_size:]
-
+    # Initialize tokenizer if not provided
+    if tokenizer is None:
+        tokenizer = SPTokenizer()
+        tokenizer_model_path = f"{tokenizer.model_prefix}.model"
+        
+        if os.path.exists(tokenizer_model_path):
+            print(f"Loading existing tokenizer from {tokenizer_model_path}")
+            tokenizer.load()
+        else:
+            print("Training new tokenizer...")
+            tokenizer.train()
+            print(f"Tokenizer trained and saved to {tokenizer_model_path}")
+    
     # Create datasets
-    train_dataset = TextGenerationDataset(train_data, tokenizer)
-    val_dataset = TextGenerationDataset(val_data, tokenizer)
-    test_dataset = TextGenerationDataset(test_data, tokenizer)
-
-    # Create dataloaders with custom collate function
+    train_dataset = TextGenerationDataset(train_file, tokenizer, max_length)
+    test_dataset = TextGenerationDataset(test_file, tokenizer, max_length)
+    
+    print(f"Training dataset size: {len(train_dataset)}")
+    print(f"Testing dataset size: {len(test_dataset)}")
+    
+    # Create dataloaders
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, device)
+        num_workers=num_workers,
+        pin_memory=True
     )
-
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_fn(batch, device)
-    )
-
+    
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=lambda batch: collate_fn(batch, device)
+        num_workers=num_workers,
+        pin_memory=True
     )
-
-    return train_dataloader, val_dataloader, test_dataloader
+    
+    return train_dataloader, test_dataloader

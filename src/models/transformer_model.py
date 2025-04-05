@@ -1,208 +1,321 @@
 """
 Transformer model implementation for text generation.
 """
+
+import math
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Tuple, Optional, Any
+import torch.nn.functional as F
+from typing import Tuple, Optional, Dict, Any, Union
 
-from src.models.base_model import BaseTextGenerationModel
+import os
+import sys
+sys.path.append("../..")
+import config
+from src.models.base_model import BaseLanguageModel
 
 
 class PositionalEncoding(nn.Module):
-    """Positional encoding for the Transformer model."""
-    
-    def __init__(self, d_model: int, max_len: int = 5000):
-        """
-        Initialize the positional encoding.
-        
-        Args:
-            d_model: Dimension of the model
-            max_len: Maximum sequence length
-        """
-        super(PositionalEncoding, self).__init__()
+    """
+    Positional encoding for the transformer model.
+    Based on the paper "Attention Is All You Need".
+    """
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = config.MAX_SEQ_LENGTH):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Create positional encoding matrix
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model)
-        )
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        # Apply sine to even indices
         pe[:, 0::2] = torch.sin(position * div_term)
+        # Apply cosine to odd indices
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        
+        # Add batch dimension and store
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Add positional encoding to the input.
+        Add positional encoding to the input embeddings.
         
         Args:
-            x: Input tensor [seq_len, batch_size, embedding_dim]
+            x: Input embeddings [batch_size, seq_len, embedding_dim]
             
         Returns:
-            Output with positional encoding added
+            Embeddings with positional encoding added
         """
-        return x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
 
 
-class TransformerModel(BaseTextGenerationModel):
-    """Transformer model for text generation."""
+class TransformerModel(BaseLanguageModel):
+    """Transformer-based language model."""
     
     def __init__(
-        self, 
-        vocab_size: int, 
-        embedding_dim: int, 
-        hidden_dim: int, 
-        nhead: int = 4, 
-        num_layers: int = 2, 
-        dropout: float = 0.2
+        self,
+        vocab_size: int,
+        embedding_dim: int = config.EMBEDDING_DIM,
+        hidden_dim: int = config.HIDDEN_DIM,
+        nhead: int = config.TRANSFORMER_NHEAD,
+        num_layers: int = config.NUM_LAYERS,
+        dim_feedforward: int = config.TRANSFORMER_DIM_FEEDFORWARD,
+        dropout: float = config.DROPOUT,
+        pad_idx: int = 0,
+        max_seq_length: int = config.MAX_SEQ_LENGTH
     ):
         """
         Initialize the Transformer model.
         
         Args:
-            vocab_size: Size of the vocabulary
-            embedding_dim: Dimension of token embeddings
-            hidden_dim: Dimension of feed forward network
-            nhead: Number of attention heads
-            num_layers: Number of transformer layers
-            dropout: Dropout rate
+            vocab_size: Size of the vocabulary.
+            embedding_dim: Dimension of the token embeddings.
+            hidden_dim: Dimension of the hidden state.
+            nhead: Number of attention heads.
+            num_layers: Number of transformer layers.
+            dim_feedforward: Dimension of the feedforward network.
+            dropout: Dropout probability.
+            pad_idx: Index of the padding token.
+            max_seq_length: Maximum sequence length.
         """
-        super(TransformerModel, self).__init__(vocab_size, embedding_dim, hidden_dim)
+        super().__init__(vocab_size, embedding_dim, hidden_dim, pad_idx, dropout)
         
-        # Transformer specific layers
-        self.pos_encoder = PositionalEncoding(embedding_dim)
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.dim_feedforward = dim_feedforward
+        self.max_seq_length = max_seq_length
         
+        # Position encoding layer
+        self.pos_encoder = PositionalEncoding(embedding_dim, dropout, max_seq_length)
+        
+        # Project embedding dim to hidden dim if they differ
+        self.input_projection = nn.Linear(embedding_dim, hidden_dim) if embedding_dim != hidden_dim else nn.Identity()
+        
+        # Transformer encoder layers
         encoder_layers = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
+            d_model=hidden_dim,
             nhead=nhead,
-            dim_feedforward=hidden_dim,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
-
-        self.fc = nn.Linear(embedding_dim, vocab_size)
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layers,
+            num_layers=num_layers
+        )
         
-        self.dropout = nn.Dropout(dropout)
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize the model weights."""
+        # Initialize embedding and output layer
+        nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
+        nn.init.normal_(self.output_layer.weight, mean=0, std=0.02)
+        nn.init.zeros_(self.output_layer.bias)
         
-    def _generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+        # Initialize transformer weights (already done by PyTorch)
+    
+    def _generate_square_subsequent_mask(self, sz: int, device: str) -> torch.Tensor:
         """
-        Generate a square mask for the sequence.
+        Generate a square mask for the sequence to prevent the model 
+        from looking at future tokens during training.
         
         Args:
-            sz: Size of the square mask
+            sz: Size of the square mask.
+            device: Device to create the mask on.
             
         Returns:
-            Mask tensor
+            A square mask of shape [sz, sz]
         """
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
-        
+    
     def forward(
-        self, 
-        x: torch.Tensor, 
-        hidden: Optional[Any] = None, 
-        temperature: float = 1.0,
-        mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, None, torch.Tensor]:
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        hidden: Optional[Any] = None  # Not used in Transformer but kept for API consistency
+    ) -> Tuple[torch.Tensor, None]:
         """
-        Forward pass of the Transformer model.
+        Forward pass through the Transformer model.
         
         Args:
-            x: Input tensor of token indices [batch_size, seq_len]
-            hidden: Not used in Transformer but kept for compatibility
-            temperature: Temperature for sampling (1.0 means greedy)
-            mask: Optional attention mask
+            input_ids: Tensor of token ids [batch_size, seq_len].
+            attention_mask: Tensor indicating which tokens to attend to [batch_size, seq_len].
+            hidden: Not used, kept for API consistency with RNN models.
             
         Returns:
-            Tuple of (logits, None, next_token)
+            output: Tensor of token logits [batch_size, seq_len, vocab_size].
+            hidden: None (kept for API consistency).
         """
-        # Apply embedding and scale
-        embedded = self.embedding(x) * np.sqrt(self.embedding.embedding_dim)
+        # Get the masks
+        device = input_ids.device
+        seq_len = input_ids.size(1)
         
-        # Apply positional encoding (expects [seq_len, batch_size, embedding_dim])
-        embedded = self.pos_encoder(embedded.transpose(0, 1)).transpose(0, 1)
-        embedded = self.dropout(embedded)
+        # Create causal mask for autoregressive property
+        mask = self._generate_square_subsequent_mask(seq_len, device)
         
-        # Create attention mask if None
-        if mask is None:
-            mask = self._generate_square_subsequent_mask(x.size(1)).to(x.device)
+        # Create padding mask if attention_mask is provided
+        src_key_padding_mask = None
+        if attention_mask is not None:
+            # Invert attention mask for transformer
+            src_key_padding_mask = (attention_mask == 0)
         
-        # Apply transformer encoder
-        output = self.transformer_encoder(embedded, mask)
+        # Embed the input tokens
+        embedded = self.embedding(input_ids) * math.sqrt(self.embedding_dim)
+        
+        # Add positional encoding
+        embedded = self.pos_encoder(embedded)
+        
+        # Project to hidden dim if needed
+        embedded = self.input_projection(embedded)
+        
+        # Pass through transformer encoder
+        output = self.transformer_encoder(
+            src=embedded,
+            mask=mask,
+            src_key_padding_mask=src_key_padding_mask
+        )
+        
+        # Apply dropout
         output = self.dropout(output)
-        logits = self.fc(output)
         
-        # Apply temperature scaling for sampling
-        if temperature != 1.0:
-            logits = logits / temperature
+        # Project to vocabulary size
+        output = self.output_layer(output)
         
-        # Sample the next token
-        if temperature == 1.0 or not self.training:
-            # Take the highest probability token (required for undergrads)
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-        else:
-            # Sample based on probabilities (required for grad students)
-            probs = torch.softmax(logits[:, -1, :], dim=-1)
-            next_token = torch.multinomial(probs, 1).squeeze(-1)
-        
-        return logits, None, next_token
+        return output, None  # None to maintain API consistency
     
     def prompt(
-        self, 
-        tokenizer, 
-        prompt_text: str, 
-        max_seq_length: int = 100, 
+        self,
+        prompt_text: str,
+        max_length: int = config.MAX_GEN_LENGTH,
         temperature: float = 1.0,
-        max_context_length: int = 512
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     ) -> str:
         """
         Generate text from a prompt.
         
         Args:
-            tokenizer: SentencePiece tokenizer
-            prompt_text: Text prompt to start generation
-            max_seq_length: Maximum number of tokens to generate
-            temperature: Temperature for sampling (1.0 means greedy)
-            max_context_length: Maximum context length to use
+            prompt_text: The text prompt to start generation from.
+            max_length: Maximum number of tokens to generate.
+            temperature: Temperature for sampling.
+            device: Device to run the model on.
             
         Returns:
-            Generated text
+            The generated text.
         """
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not set. Call set_tokenizer() first.")
+        
+        # Move model to the specified device
+        self.to(device)
         self.eval()
-        device = next(self.parameters()).device
-        prompt_ids = tokenizer.encode(prompt_text, out_type=int)
         
-        # Store generated tokens (initialize with prompt)
-        generated_ids = list(prompt_ids)
+        # Tokenize the prompt
+        if prompt_text.startswith("<bos>"):
+            # Prompt already has BOS token
+            prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=False)
+        else:
+            # Add BOS token
+            prompt_tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt_text, add_special_tokens=False)
         
-        # Generate tokens autoregressively
+        # Convert to tensor
+        input_ids = torch.tensor([prompt_tokens], dtype=torch.long).to(device)
+        
+        # Generate text
         with torch.no_grad():
-            for _ in range(max_seq_length):
-                # Make sure input doesn't exceed max context length
-                if len(generated_ids) > max_context_length:
-                    context_ids = generated_ids[-max_context_length:]
+            # Track all generated tokens (including initial prompt)
+            all_tokens = prompt_tokens.copy()
+            
+            # Generate tokens one by one
+            for _ in range(max_length):
+                # If sequence gets too long, truncate from the beginning
+                if len(all_tokens) > self.max_seq_length:
+                    input_ids = torch.tensor([all_tokens[-self.max_seq_length:]], dtype=torch.long).to(device)
                 else:
-                    context_ids = generated_ids
-                
-                input_ids = torch.tensor([context_ids], dtype=torch.long).to(device)
+                    input_ids = torch.tensor([all_tokens], dtype=torch.long).to(device)
                 
                 # Forward pass
-                logits, _, next_token = self.forward(input_ids, temperature=temperature)
+                logits, _ = self.forward(input_ids)
                 
-                # Get the next token
-                next_token_id = next_token.item()
-                generated_ids.append(next_token_id)
+                # Get the logits for the next token
+                next_token_logits = logits[0, -1, :]
                 
-                # Check for EOS token
-                if next_token_id == tokenizer.eos_id():
+                # Sample next token
+                next_token = self._sample_next_token(next_token_logits, temperature)
+                
+                # Add to generated tokens
+                all_tokens.append(next_token)
+                
+                # Stop if EOS token is generated
+                if next_token == self.tokenizer.eos_id():
                     break
         
-        # Remove prompt from the generated text
-        response_ids = generated_ids[len(prompt_ids):]
-        
-        # Decode the generated tokens
-        generated_text = tokenizer.decode(response_ids)
+        # Decode generated tokens
+        generated_text = self.tokenizer.decode(all_tokens)
         
         return generated_text
+    
+    def save(self, path: str = config.TRANSFORMER_MODEL_PATH):
+        """
+        Save the model to the specified path.
+        
+        Args:
+            path: Path to save the model.
+        """
+        # Save additional parameters specific to Transformer
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'vocab_size': self.vocab_size,
+            'embedding_dim': self.embedding_dim,
+            'hidden_dim': self.hidden_dim,
+            'nhead': self.nhead,
+            'num_layers': self.num_layers,
+            'dim_feedforward': self.dim_feedforward,
+            'pad_idx': self.pad_idx,
+            'max_seq_length': self.max_seq_length,
+        }
+        
+        torch.save(checkpoint, path)
+    
+    @classmethod
+    def load(cls, path: str = config.TRANSFORMER_MODEL_PATH, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+        """
+        Load the model from the specified path.
+        
+        Args:
+            path: Path to load the model from.
+            device: Device to load the model to.
+            
+        Returns:
+            The loaded model.
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Model file not found at {path}")
+            
+        checkpoint = torch.load(path, map_location=device)
+        
+        # Create a new model instance
+        model = cls(
+            vocab_size=checkpoint['vocab_size'],
+            embedding_dim=checkpoint['embedding_dim'],
+            hidden_dim=checkpoint['hidden_dim'],
+            nhead=checkpoint['nhead'],
+            num_layers=checkpoint['num_layers'],
+            dim_feedforward=checkpoint['dim_feedforward'],
+            pad_idx=checkpoint['pad_idx'],
+            max_seq_length=checkpoint['max_seq_length'],
+        )
+        
+        # Load the saved state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Move to device
+        model.to(device)
+        
+        return model

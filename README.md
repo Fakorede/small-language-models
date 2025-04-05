@@ -1,8 +1,6 @@
 # small-language-models
-This repository contains a PyTorch implementation of various sequential deep learning models (RNN, LSTM, and Transformer) for text generation. The project was developed as part of the CSC 7700/4700 Foundational AI course.
 
-## Project Overview
-The goal of this project is to compare the performance of three different sequential deep learning architectures for a text generation task using a dataset of classic literature from Project Gutenberg.
+This project implements text generation models using RNN, LSTM, and Transformer architectures in PyTorch. It trains these models on a small text dataset from Project Gutenberg and evaluates their performance using perplexity and BLEU score metrics
 
 ## Key Features
 

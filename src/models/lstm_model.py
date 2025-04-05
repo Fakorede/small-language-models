@@ -1,131 +1,167 @@
 """
 LSTM model implementation for text generation.
 """
+
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, List, Any
+import torch.nn.functional as F
+from typing import Tuple, Optional, Dict, Any, Union
 
-from src.models.base_model import BaseTextGenerationModel
+import os
+import sys
+sys.path.append("../..")
+import config
+from src.models.base_model import BaseLanguageModel
 
 
-class LSTMModel(BaseTextGenerationModel):
-    """LSTM model for text generation."""
+class LSTMModel(BaseLanguageModel):
+    """LSTM-based language model."""
     
     def __init__(
-        self, 
-        vocab_size: int, 
-        embedding_dim: int, 
-        hidden_dim: int, 
-        num_layers: int = 2, 
-        dropout: float = 0.2
+        self,
+        vocab_size: int,
+        embedding_dim: int = config.EMBEDDING_DIM,
+        hidden_dim: int = config.HIDDEN_DIM,
+        num_layers: int = config.NUM_LAYERS,
+        dropout: float = config.DROPOUT,
+        pad_idx: int = 0
     ):
         """
         Initialize the LSTM model.
         
         Args:
-            vocab_size: Size of the vocabulary
-            embedding_dim: Dimension of token embeddings
-            hidden_dim: Dimension of hidden states
-            num_layers: Number of LSTM layers
-            dropout: Dropout rate
+            vocab_size: Size of the vocabulary.
+            embedding_dim: Dimension of the token embeddings.
+            hidden_dim: Dimension of the hidden state.
+            num_layers: Number of LSTM layers.
+            dropout: Dropout probability.
+            pad_idx: Index of the padding token.
         """
-        super(LSTMModel, self).__init__(vocab_size, embedding_dim, hidden_dim)
+        super().__init__(vocab_size, embedding_dim, hidden_dim, pad_idx, dropout)
         
-        # LSTM specific layers
+        self.num_layers = num_layers
+        
+        # LSTM layers
         self.lstm = nn.LSTM(
             input_size=embedding_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0,
+            batch_first=True
         )
-        self.dropout = nn.Dropout(dropout)
         
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
-        temperature: float = 1.0
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-        """
-        Forward pass of the LSTM model.
-        
-        Args:
-            x: Input tensor of token indices [batch_size, seq_len]
-            hidden: Optional tuple of (hidden_state, cell_state)
-            temperature: Temperature for sampling (1.0 means greedy)
-            
-        Returns:
-            Tuple of (logits, (hidden_state, cell_state), next_token)
-        """
-        embedded = self.dropout(self.embedding(x))
-        output, hidden = self.lstm(embedded, hidden)
-        output = self.dropout(output)
-        logits = self.fc(output)
-        
-        # Apply temperature scaling for sampling
-        if temperature != 1.0:
-            logits = logits / temperature
-        
-        # Sample the next token
-        # For undergrads, just take the highest probability token
-        if temperature == 1.0 or not self.training:
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-        else:
-            # Sample based on probabilities (for grad students)
-            probs = torch.softmax(logits[:, -1, :], dim=-1)
-            next_token = torch.multinomial(probs, 1).squeeze(-1)
-        
-        return logits, hidden, next_token
+        # Initialize weights
+        self._init_weights()
     
-    def prompt(
-        self, 
-        tokenizer, 
-        prompt_text: str, 
-        max_seq_length: int = 100, 
-        temperature: float = 1.0
-    ) -> str:
+    def _init_weights(self):
+        """Initialize the model weights."""
+        for name, param in self.lstm.named_parameters():
+            if 'weight' in name:
+                nn.init.orthogonal_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+                # Set forget gate bias to 1 (helps with long sequences)
+                if 'bias_ih' in name:
+                    n = param.size(0)
+                    start, end = n // 4, n // 2
+                    param.data[start:end].fill_(1.)
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Generate text from a prompt.
+        Forward pass through the LSTM model.
         
         Args:
-            tokenizer: SentencePiece tokenizer
-            prompt_text: Text prompt to start generation
-            max_seq_length: Maximum number of tokens to generate
-            temperature: Temperature for sampling (1.0 means greedy)
+            input_ids: Tensor of token ids [batch_size, seq_len].
+            attention_mask: Tensor indicating which tokens to attend to [batch_size, seq_len].
+            hidden: Tuple of (h_0, c_0) with shape [num_layers, batch_size, hidden_dim] each.
             
         Returns:
-            Generated text
+            output: Tensor of token logits [batch_size, seq_len, vocab_size].
+            hidden: Tuple of updated (h_n, c_n) hidden states.
         """
-        self.eval()
-        device = next(self.parameters()).device
-        prompt_ids = tokenizer.encode(prompt_text, out_type=int)
-        input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0).to(device)
+        # Get batch size and sequence length
+        batch_size, seq_len = input_ids.shape
         
-        # Initialize hidden state
-        hidden = None
+        # Initialize hidden state if not provided
+        if hidden is None:
+            device = input_ids.device
+            h_0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=device)
+            c_0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim, device=device)
+            hidden = (h_0, c_0)
         
-        # Store generated tokens
-        generated_ids = []
+        # Embed the input tokens
+        embedded = self.embedding(input_ids)
+        embedded = self.dropout(embedded)
         
-        # Generate tokens autoregressively
-        with torch.no_grad():
-            for _ in range(max_seq_length):
-                # Forward pass
-                logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
-                
-                # Get the next token
-                next_token_id = next_token.item()
-                generated_ids.append(next_token_id)
-                
-                # Check for EOS token
-                if next_token_id == tokenizer.eos_id():
-                    break
-                
-                # Prepare next input (only use the last predicted token)
-                input_ids = next_token.unsqueeze(0)
+        # Pass through LSTM
+        output, hidden = self.lstm(embedded, hidden)
         
-        # Decode the generated tokens
-        generated_text = tokenizer.decode(generated_ids)
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            output = output * attention_mask.unsqueeze(-1)
         
-        return generated_text
+        # Apply dropout
+        output = self.dropout(output)
+        
+        # Project to vocabulary size
+        output = self.output_layer(output)
+        
+        return output, hidden
+    
+    def save(self, path: str = config.LSTM_MODEL_PATH):
+        """
+        Save the model to the specified path.
+        
+        Args:
+            path: Path to save the model.
+        """
+        # Save additional parameters specific to LSTM
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'vocab_size': self.vocab_size,
+            'embedding_dim': self.embedding_dim,
+            'hidden_dim': self.hidden_dim,
+            'num_layers': self.num_layers,
+            'pad_idx': self.pad_idx,
+        }
+        
+        torch.save(checkpoint, path)
+    
+    @classmethod
+    def load(cls, path: str = config.LSTM_MODEL_PATH, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+        """
+        Load the model from the specified path.
+        
+        Args:
+            path: Path to load the model from.
+            device: Device to load the model to.
+            
+        Returns:
+            The loaded model.
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Model file not found at {path}")
+            
+        checkpoint = torch.load(path, map_location=device)
+        
+        # Create a new model instance
+        model = cls(
+            vocab_size=checkpoint['vocab_size'],
+            embedding_dim=checkpoint['embedding_dim'],
+            hidden_dim=checkpoint['hidden_dim'],
+            num_layers=checkpoint['num_layers'],
+            pad_idx=checkpoint['pad_idx']
+        )
+        
+        # Load the saved state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Move to device
+        model.to(device)
+        
+        return model
