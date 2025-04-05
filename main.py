@@ -12,8 +12,9 @@ from typing import Dict, Any, List, Tuple
 import config
 from src.data.tokenizer import load_or_train_tokenizer
 from src.data.dataset import create_dataloaders, read_jsonl_file
-from models.lstm_model import LSTMModel
+from src.models.lstm_model import LSTMModel
 from src.models.rnn_model import RNNModel
+from src.models.transformer_model import TransformerModel
 from src.training.trainer import ModelTrainer
 from src.visualization.loss_plots import plot_loss_curves
 
@@ -76,11 +77,20 @@ def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[fl
     #     dropout=config.DROPOUT
     # ).to(config.DEVICE)
 
-    lstm_model = LSTMModel(
+    # lstm_model = LSTMModel(
+    #     config.VOCAB_SIZE, 
+    #     config.EMBEDDING_DIM, 
+    #     config.HIDDEN_DIM,
+    #     num_layers=config.LSTM_LAYERS,
+    #     dropout=config.DROPOUT
+    # ).to(config.DEVICE)
+
+    transformer_model = TransformerModel(
         config.VOCAB_SIZE, 
         config.EMBEDDING_DIM, 
         config.HIDDEN_DIM,
-        num_layers=config.LSTM_LAYERS,
+        nhead=config.TRANSFORMER_HEADS,
+        num_layers=config.TRANSFORMER_LAYERS,
         dropout=config.DROPOUT
     ).to(config.DEVICE)
 
@@ -88,6 +98,7 @@ def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[fl
     # Define model save paths
     rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
     lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
+    transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
 
     # Train RNN model
     print("\nTraining RNN model...")
@@ -106,28 +117,46 @@ def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[fl
 
     # Train LSTM model
     print("\nTraining LSTM model...")
-    lstm_trainer = ModelTrainer(
-        lstm_model,
+    # lstm_trainer = ModelTrainer(
+    #     lstm_model,
+    #     train_dataloader,
+    #     val_dataloader,
+    #     learning_rate=config.LEARNING_RATE,
+    #     model_save_path=lstm_save_path,
+    #     device=config.DEVICE
+    # )
+    # lstm_train_losses, lstm_val_losses = lstm_trainer.train(
+    #     config.NUM_EPOCHS,
+    #     early_stopping_patience=config.EARLY_STOPPING_PATIENCE
+    # )
+
+    # Train Transformer model
+    print("\nTraining Transformer model...")
+    transformer_trainer = ModelTrainer(
+        transformer_model,
         train_dataloader,
         val_dataloader,
         learning_rate=config.LEARNING_RATE,
-        model_save_path=lstm_save_path,
+        model_save_path=transformer_save_path,
         device=config.DEVICE
     )
-    lstm_train_losses, lstm_val_losses = lstm_trainer.train(
+    transformer_train_losses, transformer_val_losses = transformer_trainer.train(
         config.NUM_EPOCHS,
         early_stopping_patience=config.EARLY_STOPPING_PATIENCE
     )
 
+
     # Create models and losses dictionaries
     models = {
         # 'RNN': rnn_model,
-        'LSTM': lstm_model,
+        # 'LSTM': lstm_model,
+        'Transformer': transformer_model
     }
 
     losses = {
         # 'RNN': (rnn_train_losses, rnn_val_losses),
-        'LSTM': (lstm_train_losses, lstm_val_losses),
+        # 'LSTM': (lstm_train_losses, lstm_val_losses),
+        'Transformer': (transformer_train_losses, transformer_val_losses)
     }
 
     return models, losses #, test_dataloader, tokenizer
@@ -169,17 +198,27 @@ def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, 
     #     dropout=config.DROPOUT
     # ).to(config.DEVICE)
 
-    lstm_model = LSTMModel(
+    # lstm_model = LSTMModel(
+    #     config.VOCAB_SIZE, 
+    #     config.EMBEDDING_DIM, 
+    #     config.HIDDEN_DIM,
+    #     num_layers=config.LSTM_LAYERS,
+    #     dropout=config.DROPOUT
+    # ).to(config.DEVICE)
+
+    transformer_model = TransformerModel(
         config.VOCAB_SIZE, 
         config.EMBEDDING_DIM, 
         config.HIDDEN_DIM,
-        num_layers=config.LSTM_LAYERS,
+        nhead=config.TRANSFORMER_HEADS,
+        num_layers=config.TRANSFORMER_LAYERS,
         dropout=config.DROPOUT
     ).to(config.DEVICE)
 
     # Define model paths
     rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
     lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
+    transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
 
     # Load trained weights if available
     # if os.path.exists(rnn_save_path):
@@ -188,11 +227,17 @@ def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, 
     # else:
     #     print(f"Warning: RNN model file not found at {rnn_save_path}")
 
-    if os.path.exists(lstm_save_path):
-        lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
-        print(f"Loaded LSTM model from {lstm_save_path}")
+    # if os.path.exists(lstm_save_path):
+    #     lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
+    #     print(f"Loaded LSTM model from {lstm_save_path}")
+    # else:
+    #     print(f"Warning: LSTM model file not found at {lstm_save_path}")
+
+    if os.path.exists(transformer_save_path):
+        transformer_model.load_state_dict(torch.load(transformer_save_path, map_location=config.DEVICE))
+        print(f"Loaded Transformer model from {transformer_save_path}")
     else:
-        print(f"Warning: LSTM model file not found at {lstm_save_path}")
+        print(f"Warning: Transformer model file not found at {transformer_save_path}")
     
 
 
@@ -214,12 +259,14 @@ def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, 
 
     # Set models to evaluation mode
     # rnn_model.eval()
-    lstm_model.eval()
+    # lstm_model.eval()
+    transformer_model.eval()
 
     # Create models dictionary
     models = {
         # 'RNN': rnn_model,
-        'LSTM': lstm_model,
+        # 'LSTM': lstm_model,
+        'Transformer': transformer_model
     }
 
     return models, test_dataloader, tokenizer  # !/usr/bin/env python
@@ -287,13 +334,13 @@ def main():
 
         # Plot loss curves
         print("\nPlotting loss curves...")
-        save_path = os.path.join(config.PLOT_DIR, "lstm_loss.png")
-        lstm_train_losses, lstm_val_losses = losses['LSTM']
+        save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
+        transformer_train_losses, transformer_val_losses = losses['Transformer']
 
         plot_loss_curves(
-            lstm_train_losses,
-            lstm_val_losses,
-            "LSTM Model Loss",
+            transformer_train_losses,
+            transformer_val_losses,
+            "Transformer Model Loss",
             save_path
         )
 
