@@ -36,7 +36,9 @@ class RNNModel(BaseTextGenerationModel):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
 
     def forward(
             self,
@@ -64,14 +66,9 @@ class RNNModel(BaseTextGenerationModel):
         if temperature != 1.0:
             logits = logits / temperature
 
-        # Sample the next token
-        # take the highest probability token
-        if temperature == 1.0 or not self.training:
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-        else:
-            # or sample based on probabilities
-            probs = torch.softmax(logits[:, -1, :], dim=-1)
-            next_token = torch.multinomial(probs, 1).squeeze(-1)
+        # Sample the next token based on probabilities
+        probs = torch.softmax(logits[:, -1, :], dim=-1)
+        next_token = torch.multinomial(probs, 1).squeeze(-1)
 
         return logits, hidden, next_token
 
