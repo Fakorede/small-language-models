@@ -1,402 +1,278 @@
 """
-Main script for text generation model training and evaluation.
+Main entry point for the text generation project.
 """
+
 import os
-import torch
-import random
-import numpy as np
+import sys
 import argparse
-from typing import Dict, Any, List, Tuple
+import torch
+import numpy as np
+import random
+from typing import Dict, List, Optional, Any, Union
 
-# Import project modules
 import config
-from src.data.tokenizer import load_or_train_tokenizer
-from src.data.dataset import create_dataloaders, read_jsonl_file
-from src.models.lstm_model import LSTMModel
+from src.data.tokenizer import SPTokenizer
+from src.data.dataset import create_dataloaders
 from src.models.rnn_model import RNNModel
+from src.models.lstm_model import LSTMModel
 from src.models.transformer_model import TransformerModel
-from src.training.trainer import ModelTrainer
-from src.visualization.loss_plots import plot_loss_curves
+from src.training.trainer import Trainer
+from src.evaluation.metrics import evaluate_model, generate_responses
+from src.visualization.loss_plots import plot_metric_comparison, plot_all_metrics_comparison
 
 
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
+def set_seed(seed: int = config.SEED):
+    """Set random seed for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
-def ensure_dirs() -> None:
-    """Ensure all required directories exist."""
-    os.makedirs(config.MODEL_DIR, exist_ok=True)
-    os.makedirs(config.PLOT_DIR, exist_ok=True)
-    os.makedirs(os.path.dirname(config.TOKENIZER_MODEL_PREFIX), exist_ok=True)
-
-
-def train_models(model_type=0) -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[float]]]]:
+def get_model(model_type: str, vocab_size: int) -> torch.nn.Module:
     """
-    Train models based on the specified model type.
-
+    Get the appropriate model based on the model type.
+    
+    Args:
+        model_type: Type of model ('rnn', 'lstm', or 'transformer').
+        vocab_size: Size of the vocabulary.
+        
     Returns:
-        Tuple of (models_dict, losses_dict)
+        The instantiated model.
     """
-    # Load and prepare data
-    print("\nLoading and preparing data...")
-
-    # Train or load tokenizer
-    tokenizer = load_or_train_tokenizer(
-        config.RAW_DIR,
-        config.VOCAB_SIZE,
-        config.TOKENIZER_MODEL_PREFIX
-    )
-
-    # Read training and testing data
-    train_data = read_jsonl_file(config.TRAIN_FILE)
-    test_data = read_jsonl_file(config.TEST_FILE)
-
-    # Create dataloaders
-    train_dataloader, val_dataloader, test_dataloader = create_dataloaders(
-        train_data,
-        test_data,
-        tokenizer,
-        config.BATCH_SIZE,
-        config.DEVICE,
-        config.TRAIN_VAL_SPLIT
-    )
-
-    # Initialize models
-    print("\nInitializing models...")
-
-    models = {}
-    losses = {}
-
-    # Train models based on the model type
-    if model_type == 0 or model_type == 1:
-        # Train RNN model
-        print("\nTraining RNN model...")
-        rnn_model = RNNModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.RNN_LAYERS,
+    if model_type == 'rnn':
+        model = RNNModel(
+            vocab_size=vocab_size,
+            embedding_dim=config.EMBEDDING_DIM,
+            hidden_dim=config.HIDDEN_DIM,
+            num_layers=config.NUM_LAYERS,
             dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-        rnn_trainer = ModelTrainer(
-            rnn_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=rnn_save_path,
-            device=config.DEVICE
         )
-        rnn_train_losses, rnn_val_losses = rnn_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-        
-        models['RNN'] = rnn_model
-        losses['RNN'] = (rnn_train_losses, rnn_val_losses)
-
-    if model_type == 0 or model_type == 2:
-        # Train LSTM model
-        print("\nTraining LSTM model...")
-        lstm_model = LSTMModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.LSTM_LAYERS,
+    elif model_type == 'lstm':
+        model = LSTMModel(
+            vocab_size=vocab_size,
+            embedding_dim=config.EMBEDDING_DIM,
+            hidden_dim=config.HIDDEN_DIM,
+            num_layers=config.NUM_LAYERS,
             dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-        lstm_trainer = ModelTrainer(
-            lstm_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=lstm_save_path,
-            device=config.DEVICE
         )
-        lstm_train_losses, lstm_val_losses = lstm_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-        
-        models['LSTM'] = lstm_model
-        losses['LSTM'] = (lstm_train_losses, lstm_val_losses)
-
-    if model_type == 0 or model_type == 3:
-        # Train Transformer model
-        print("\nTraining Transformer model...")
-        transformer_model = TransformerModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            nhead=config.TRANSFORMER_HEADS,
-            num_layers=config.TRANSFORMER_LAYERS,
+    elif model_type == 'transformer':
+        model = TransformerModel(
+            vocab_size=vocab_size,
+            embedding_dim=config.EMBEDDING_DIM,
+            hidden_dim=config.HIDDEN_DIM,
+            nhead=config.TRANSFORMER_NHEAD,
+            num_layers=config.NUM_LAYERS,
+            dim_feedforward=config.TRANSFORMER_DIM_FEEDFORWARD,
             dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-        transformer_trainer = ModelTrainer(
-            transformer_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=transformer_save_path,
-            device=config.DEVICE
         )
-        transformer_train_losses, transformer_val_losses = transformer_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-
-        models['Transformer'] = transformer_model
-        losses['Transformer'] = (transformer_train_losses, transformer_val_losses)
-
-    return models, losses #, test_dataloader, tokenizer
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    return model
 
 
-def load_trained_models(model_type=0) -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, Any]:
+def load_or_train_model(
+    model_type: str,
+    tokenizer: SPTokenizer,
+    train_dataloader: torch.utils.data.DataLoader,
+    val_dataloader: torch.utils.data.DataLoader,
+    train: bool = False,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+) -> torch.nn.Module:
     """
-    Load pre-trained models based on the specified model type.
-
+    Load a pre-trained model or train a new one.
+    
+    Args:
+        model_type: Type of model ('rnn', 'lstm', or 'transformer').
+        tokenizer: Tokenizer instance.
+        train_dataloader: DataLoader for training.
+        val_dataloader: DataLoader for validation.
+        train: Whether to train the model even if a pre-trained one exists.
+        device: Device to train on.
+        
     Returns:
-        Tuple of (models_dict, test_dataloader, tokenizer)
+        The loaded or trained model.
     """
-    # Load tokenizer
-    tokenizer = load_or_train_tokenizer(
-        config.RAW_DIR,
-        config.VOCAB_SIZE,
-        config.TOKENIZER_MODEL_PREFIX
+    # Get model paths
+    if model_type == 'rnn':
+        model_path = config.RNN_MODEL_PATH
+        model_class = RNNModel
+    elif model_type == 'lstm':
+        model_path = config.LSTM_MODEL_PATH
+        model_class = LSTMModel
+    elif model_type == 'transformer':
+        model_path = config.TRANSFORMER_MODEL_PATH
+        model_class = TransformerModel
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    # Check if model exists and load it
+    if os.path.exists(model_path) and not train:
+        print(f"Loading pre-trained {model_type} model from {model_path}")
+        model = model_class.load(model_path, device=device)
+        model.set_tokenizer(tokenizer)
+        return model
+    
+    # Create new model
+    model = get_model(model_type, tokenizer.vocab_size)
+    model.set_tokenizer(tokenizer)
+    
+    # Train the model
+    trainer = Trainer(
+        model=model,
+        train_dataloader=train_dataloader,
+        val_dataloader=val_dataloader,
+        device=device,
+        model_type=model_type
     )
-
-    # Read testing data
-    test_data = read_jsonl_file(config.TEST_FILE)
-
-    # Create test dataloader (with dummy train/val data)
-    _, _, test_dataloader = create_dataloaders(
-        test_data,  # We're not using train data here, but the function requires it
-        test_data,
-        tokenizer,
-        config.BATCH_SIZE,
-        config.DEVICE,
-        config.TRAIN_VAL_SPLIT
-    )
-
-    # Initialize models dictionary
-    models = {}
-
-    # Load RNN model
-    if model_type == 0 or model_type == 1:
-        rnn_model = RNNModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.RNN_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-        if os.path.exists(rnn_save_path):
-            rnn_model.load_state_dict(torch.load(rnn_save_path, map_location=config.DEVICE))
-            print(f"Loaded RNN model from {rnn_save_path}")
-            models['RNN'] = rnn_model
-        else:
-            print(f"Warning: RNN model file not found at {rnn_save_path}")    
-
-    # Load LSTM model
-    if model_type == 0 or model_type == 2:
-        lstm_model = LSTMModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.LSTM_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-        if os.path.exists(lstm_save_path):
-            lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
-            print(f"Loaded LSTM model from {lstm_save_path}")
-            models['LSTM'] = lstm_model
-        else:
-            print(f"Warning: LSTM model file not found at {lstm_save_path}")
     
-    # Load Transformer model
-    if model_type == 0 or model_type == 3:
-        transformer_model = TransformerModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            nhead=config.TRANSFORMER_HEADS,
-            num_layers=config.TRANSFORMER_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-        if os.path.exists(transformer_save_path):
-            transformer_model.load_state_dict(torch.load(transformer_save_path, map_location=config.DEVICE))
-            print(f"Loaded Transformer model from {transformer_save_path}")
-            models['Transformer'] = transformer_model
-        else:
-            print(f"Warning: Transformer model file not found at {transformer_save_path}")
-
-    # Set models to evaluation mode
-    for model in models.values():
-        model.eval()
-
-    return models, test_dataloader, tokenizer
-
-
-def test_token_generation(model, tokenizer, device):
-    """Test token generation directly."""
-    # Create a simple input
-    test_text = "the cat sat on the"
-    test_ids = tokenizer.encode(test_text, out_type=int)
-    input_tensor = torch.tensor([test_ids], dtype=torch.long).to(device)
+    trainer.train(num_epochs=config.NUM_EPOCHS)
     
-    print(f"\nTesting with input: '{test_text}'")
-    print(f"Input tensor shape: {input_tensor.shape}")
-    
-    # Run forward pass
-    model.eval()
-    with torch.no_grad():
-        logits, _, _ = model(input_tensor)
-    
-    # Get predictions for last token
-    last_token_logits = logits[0, -1, :]
-    
-    # Get top 10 predictions
-    probs = torch.softmax(last_token_logits, dim=-1)
-    top_k = torch.topk(probs, 10)
-    
-    print("\nTop 10 next token predictions:")
-    for i, (idx, prob) in enumerate(zip(top_k.indices.cpu().numpy(), top_k.values.cpu().numpy())):
-        try:
-            token_text = tokenizer.IdToPiece(int(idx))
-            print(f"{i+1}. Token ID {idx}: '{token_text}' (Prob: {prob:.4f})")
-        except Exception as e:
-            print(f"{i+1}. Token ID {idx}: [Error decoding token: {e}] (Prob: {prob:.4f})")
-
-    generated = model.prompt(tokenizer, test_text, config.DEFAULT_MAX_GEN_LENGTH, config.DEFAULT_TEMPERATURE)
-    print("CHECKED!")
+    return model
 
 
 def main():
     """Main function."""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Text Generation with RNN, LSTM, and Transformer')
-    parser.add_argument('--train', action='store_true', help='Train models')
-    parser.add_argument('--evaluate', action='store_true', help='Evaluate models')
-    parser.add_argument('--generate', action='store_true', help='Generate text')
-    parser.add_argument('--prompt', type=str, help='Text prompt for generation')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for sampling')
-    parser.add_argument('--max_length', type=int, default=100, help='Maximum length to generate')
-    parser.add_argument('--seed', type=int, default=config.RANDOM_SEED, help='Random seed')
-    parser.add_argument('--model_type', type=int, default=config.MODEL_TYPE, help='Model type (0=all, 1=rnn, 2=lstm, 3=transformer)')
+    parser = argparse.ArgumentParser(description="Text Generation with RNN, LSTM, and Transformer models")
+    
+    parser.add_argument("--train", action="store_true", help="Train the models")
+    parser.add_argument("--evaluate", action="store_true", help="Evaluate the models")
+    parser.add_argument("--generate", action="store_true", help="Generate text from the models")
+    parser.add_argument("--model_type", type=int, default=0, 
+                        help="Model type: 0=all, 1=RNN, 2=LSTM, 3=Transformer")
+    parser.add_argument("--prompt", type=str, default="Which do you prefer? Dogs or cats?",
+                        help="Prompt for text generation")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Temperature for text generation sampling")
+    parser.add_argument("--max_length", type=int, default=100,
+                        help="Maximum length for generated text")
+    
     args = parser.parse_args()
-
-    # Set random seed for reproducibility
-    set_seed(args.seed)
-
-    # Ensure required directories exist
-    ensure_dirs()
-
-    # Print device information
-    print(f"Using device: {config.DEVICE}")
-
-    # Validate model_type
-    if args.model_type not in [0, 1, 2, 3]:
-        print(f"Error: Invalid model_type {args.model_type}. Must be 0 (all), 1 (RNN), 2 (LSTM), or 3 (Transformer).")
-        return
-
-    # Train or load models
-    if args.train:
-        models, losses = train_models(args.model_type) # models, losses, test_dataloader, tokenizer = train_models(args.model_type)
-
-        # Plot loss curves
-        print("\nPlotting loss curves...")
-        # plot_all_models_loss(losses, config.PLOT_DIR)
-        # save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
-        # transformer_train_losses, transformer_val_losses = losses['Transformer']
-
-        # plot_loss_curves(
-        #     transformer_train_losses,
-        #     transformer_val_losses,
-        #     "Transformer Model Loss",
-        #     save_path
-        # )
-
-        # Evaluate models if requested
-        if args.evaluate:
-            print("\nEvaluating models...")
-            # evaluate_models(models, test_dataloader, tokenizer)
-
-    # Only evaluate pre-trained models
-    elif args.evaluate:
-        models, test_dataloader, tokenizer = load_trained_models(args.model_type)
-        print("\nEvaluating models...")
-        # evaluate_models(models, test_dataloader, tokenizer)
-
-    # Generate text from a prompt
-    elif args.generate:
-        if not args.prompt:
-            print("Error: Please provide a prompt with --prompt")
-            return
-
-        models, _, tokenizer = load_trained_models(args.model_type)
-
-        if not models:
-            print("Error: No models loaded. Make sure the model files exist.")
-            return
-
-        # test_sentences = [
-        #     "The quick brown fox jumps over the lazy dog.",
-        #     "Hello, world! How are you doing today?",
-        #     "Once upon a time in a land far, far away."
-        # ]
-
-        # for sentence in test_sentences:
-        #     encoded = tokenizer.encode(sentence, out_type=int)
-        #     decoded = tokenizer.decode(encoded)
-        #     print(f"Original: '{sentence}'")
-        #     print(f"Encoded: {encoded}")
-        #     print(f"Decoded: '{decoded}'")
-        #     print()
-
-        # print("\nTokenizer information:")
-        # print(f"Pad ID: {tokenizer.pad_id()}")
-        # print(f"Unknown ID: {tokenizer.unk_id()}")
-        # print(f"BOS ID: {tokenizer.bos_id()}")
-        # print(f"EOS ID: {tokenizer.eos_id()}")
-        # print(f"Vocab size: {tokenizer.get_piece_size()}")
-
-        # # Test token generation directly
-        # print("\nTesting token generation with RNN model")
-        # test_token_generation(models['RNN'], tokenizer, config.DEVICE)
-
-        print(f"\nGenerating text with prompt: '{args.prompt}'")
-        print(f"Temperature: {args.temperature}, Max Length: {args.max_length}")
-
-        for name, model in models.items():
-            generated = model.prompt(
-                tokenizer,
-                args.prompt,
-                max_seq_length=args.max_length,
-                temperature=args.temperature
-            )
-            print(f"\n{name} Model:")
-            print(f"'{generated}'")
-
-    # If no action specified, print help
-    else:
+    
+    # If no action is specified, print help
+    if not (args.train or args.evaluate or args.generate):
         parser.print_help()
-
+        return
+    
+    # Set random seed for reproducibility
+    set_seed(config.SEED)
+    
+    # Map model_type to model names
+    model_types = {
+        0: ['rnn', 'lstm', 'transformer'],
+        1: ['rnn'],
+        2: ['lstm'],
+        3: ['transformer']
+    }
+    model_types = model_types.get(args.model_type, ['rnn', 'lstm', 'transformer'])
+    
+    # Initialize tokenizer
+    tokenizer = SPTokenizer()
+    tokenizer_model_path = f"{tokenizer.model_prefix}.model"
+    
+    if os.path.exists(tokenizer_model_path):
+        print(f"Loading existing tokenizer from {tokenizer_model_path}")
+        tokenizer.load()
+    else:
+        print("Training new tokenizer...")
+        tokenizer.train()
+        print(f"Tokenizer trained and saved to {tokenizer_model_path}")
+    
+    # Create dataloaders
+    train_dataloader, test_dataloader = create_dataloaders(
+        tokenizer=tokenizer,
+        batch_size=config.BATCH_SIZE
+    )
+    
+    # Determine device
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    
+    # Process each model type
+    models = {}
+    for model_type in model_types:
+        print(f"\nProcessing {model_type.upper()} model")
+        
+        # Load or train model
+        model = load_or_train_model(
+            model_type=model_type,
+            tokenizer=tokenizer,
+            train_dataloader=train_dataloader,
+            val_dataloader=test_dataloader,
+            train=args.train,
+            device=device
+        )
+        
+        models[model_type] = model
+    
+    # Evaluate models
+    if args.evaluate:
+        metrics = {}
+        
+        for model_type, model in models.items():
+            print(f"\nEvaluating {model_type.upper()} model")
+            metrics[model_type] = evaluate_model(
+                model=model,
+                test_dataloader=test_dataloader,
+                tokenizer=tokenizer,
+                device=device
+            )
+            print(f"Metrics for {model_type.upper()} model: {metrics[model_type]}")
+        
+        # Plot perplexity comparison
+        perplexity_plot_path = os.path.join(config.PLOTS_DIR, "perplexity_comparison.png")
+        plot_metric_comparison(
+            metrics=metrics,
+            metric_name="perplexity",
+            title="Perplexity Comparison",
+            save_path=perplexity_plot_path,
+            is_lower_better=True
+        )
+        
+        # Plot BLEU score comparison
+        bleu_plot_path = os.path.join(config.PLOTS_DIR, "bleu_comparison.png")
+        plot_metric_comparison(
+            metrics=metrics,
+            metric_name="bleu_score",
+            title="BLEU Score Comparison",
+            save_path=bleu_plot_path,
+            is_lower_better=False
+        )
+        
+        # Plot normalized metrics comparison
+        metrics_plot_path = os.path.join(config.PLOTS_DIR, "all_metrics_comparison.png")
+        plot_all_metrics_comparison(
+            metrics=metrics,
+            title="All Metrics Comparison (Normalized)",
+            save_path=metrics_plot_path
+        )
+        
+    # Generate text
+    if args.generate:
+        # Use standard prompt if not specified
+        prompts = [
+            args.prompt,
+            "Which do you prefer? Dogs or cats?"
+        ]
+        
+        for model_type, model in models.items():
+            print(f"\nGenerating text with {model_type.upper()} model")
+            responses = generate_responses(
+                model=model,
+                prompts=prompts,
+                tokenizer=tokenizer,
+                max_length=args.max_length,
+                temperature=args.temperature,
+                device=device
+            )
+            
+            for i, (prompt, response) in enumerate(zip(prompts, responses)):
+                print(f"\nPrompt {i+1}: {prompt}")
+                print(f"Response: {response}")
 
 if __name__ == "__main__":
     main()
