@@ -44,3 +44,5 @@ DEFAULT_TEMPERATURE = 0.8
 
 # Random seeds for reproducibility
 RANDOM_SEED = 42
+
+MODEL_TYPE = "transformer"  # Options: "rnn", "lstm", "transformer", "all"

@@ -35,9 +35,9 @@ def ensure_dirs() -> None:
     os.makedirs(os.path.dirname(config.TOKENIZER_MODEL_PREFIX), exist_ok=True)
 
 
-def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[float]]]]:
+def train_models(model_type=0) -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[float]]]]:
     """
-    Train all models.
+    Train models based on the specified model type.
 
     Returns:
         Tuple of (models_dict, losses_dict)
@@ -69,102 +69,101 @@ def train_models() -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[fl
     # Initialize models
     print("\nInitializing models...")
 
-    # rnn_model = RNNModel(
-    #     config.VOCAB_SIZE,
-    #     config.EMBEDDING_DIM,
-    #     config.HIDDEN_DIM,
-    #     num_layers=config.RNN_LAYERS,
-    #     dropout=config.DROPOUT
-    # ).to(config.DEVICE)
+    models = {}
+    losses = {}
 
-    # lstm_model = LSTMModel(
-    #     config.VOCAB_SIZE, 
-    #     config.EMBEDDING_DIM, 
-    #     config.HIDDEN_DIM,
-    #     num_layers=config.LSTM_LAYERS,
-    #     dropout=config.DROPOUT
-    # ).to(config.DEVICE)
+    # Train models based on the model type
+    if model_type == 0 or model_type == 1:
+        # Train RNN model
+        print("\nTraining RNN model...")
+        rnn_model = RNNModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            num_layers=config.RNN_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
+        rnn_trainer = ModelTrainer(
+            rnn_model,
+            train_dataloader,
+            val_dataloader,
+            learning_rate=config.LEARNING_RATE,
+            model_save_path=rnn_save_path,
+            device=config.DEVICE
+        )
+        rnn_train_losses, rnn_val_losses = rnn_trainer.train(
+            config.NUM_EPOCHS,
+            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
+        )
+        
+        models['RNN'] = rnn_model
+        losses['RNN'] = (rnn_train_losses, rnn_val_losses)
 
-    transformer_model = TransformerModel(
-        config.VOCAB_SIZE, 
-        config.EMBEDDING_DIM, 
-        config.HIDDEN_DIM,
-        nhead=config.TRANSFORMER_HEADS,
-        num_layers=config.TRANSFORMER_LAYERS,
-        dropout=config.DROPOUT
-    ).to(config.DEVICE)
+    if model_type == 0 or model_type == 2:
+        # Train LSTM model
+        print("\nTraining LSTM model...")
+        lstm_model = LSTMModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            num_layers=config.LSTM_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
+        lstm_trainer = ModelTrainer(
+            lstm_model,
+            train_dataloader,
+            val_dataloader,
+            learning_rate=config.LEARNING_RATE,
+            model_save_path=lstm_save_path,
+            device=config.DEVICE
+        )
+        lstm_train_losses, lstm_val_losses = lstm_trainer.train(
+            config.NUM_EPOCHS,
+            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
+        )
+        
+        models['LSTM'] = lstm_model
+        losses['LSTM'] = (lstm_train_losses, lstm_val_losses)
 
+    if model_type == 0 or model_type == 3:
+        # Train Transformer model
+        print("\nTraining Transformer model...")
+        transformer_model = TransformerModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            nhead=config.TRANSFORMER_HEADS,
+            num_layers=config.TRANSFORMER_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
+        transformer_trainer = ModelTrainer(
+            transformer_model,
+            train_dataloader,
+            val_dataloader,
+            learning_rate=config.LEARNING_RATE,
+            model_save_path=transformer_save_path,
+            device=config.DEVICE
+        )
+        transformer_train_losses, transformer_val_losses = transformer_trainer.train(
+            config.NUM_EPOCHS,
+            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
+        )
 
-    # Define model save paths
-    rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-    lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-    transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-
-    # Train RNN model
-    print("\nTraining RNN model...")
-    # rnn_trainer = ModelTrainer(
-    #     rnn_model,
-    #     train_dataloader,
-    #     val_dataloader,
-    #     learning_rate=config.LEARNING_RATE,
-    #     model_save_path=rnn_save_path,
-    #     device=config.DEVICE
-    # )
-    # rnn_train_losses, rnn_val_losses = rnn_trainer.train(
-    #     config.NUM_EPOCHS,
-    #     early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-    # )
-
-    # Train LSTM model
-    print("\nTraining LSTM model...")
-    # lstm_trainer = ModelTrainer(
-    #     lstm_model,
-    #     train_dataloader,
-    #     val_dataloader,
-    #     learning_rate=config.LEARNING_RATE,
-    #     model_save_path=lstm_save_path,
-    #     device=config.DEVICE
-    # )
-    # lstm_train_losses, lstm_val_losses = lstm_trainer.train(
-    #     config.NUM_EPOCHS,
-    #     early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-    # )
-
-    # Train Transformer model
-    print("\nTraining Transformer model...")
-    transformer_trainer = ModelTrainer(
-        transformer_model,
-        train_dataloader,
-        val_dataloader,
-        learning_rate=config.LEARNING_RATE,
-        model_save_path=transformer_save_path,
-        device=config.DEVICE
-    )
-    transformer_train_losses, transformer_val_losses = transformer_trainer.train(
-        config.NUM_EPOCHS,
-        early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-    )
-
-
-    # Create models and losses dictionaries
-    models = {
-        # 'RNN': rnn_model,
-        # 'LSTM': lstm_model,
-        'Transformer': transformer_model
-    }
-
-    losses = {
-        # 'RNN': (rnn_train_losses, rnn_val_losses),
-        # 'LSTM': (lstm_train_losses, lstm_val_losses),
-        'Transformer': (transformer_train_losses, transformer_val_losses)
-    }
+        models['Transformer'] = transformer_model
+        losses['Transformer'] = (transformer_train_losses, transformer_val_losses)
 
     return models, losses #, test_dataloader, tokenizer
 
 
-def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, Any]:
+def load_trained_models(model_type=0) -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, Any]:
     """
-    Load pre-trained models.
+    Load pre-trained models based on the specified model type.
 
     Returns:
         Tuple of (models_dict, test_dataloader, tokenizer)
@@ -189,87 +188,69 @@ def load_trained_models() -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, 
         config.TRAIN_VAL_SPLIT
     )
 
-    # Initialize models
-    # rnn_model = RNNModel(
-    #     config.VOCAB_SIZE,
-    #     config.EMBEDDING_DIM,
-    #     config.HIDDEN_DIM,
-    #     num_layers=config.RNN_LAYERS,
-    #     dropout=config.DROPOUT
-    # ).to(config.DEVICE)
+    # Initialize models dictionary
+    models = {}
 
-    # lstm_model = LSTMModel(
-    #     config.VOCAB_SIZE, 
-    #     config.EMBEDDING_DIM, 
-    #     config.HIDDEN_DIM,
-    #     num_layers=config.LSTM_LAYERS,
-    #     dropout=config.DROPOUT
-    # ).to(config.DEVICE)
+    # Load RNN model
+    if model_type == 0 or model_type == 1:
+        rnn_model = RNNModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            num_layers=config.RNN_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
+        if os.path.exists(rnn_save_path):
+            rnn_model.load_state_dict(torch.load(rnn_save_path, map_location=config.DEVICE))
+            print(f"Loaded RNN model from {rnn_save_path}")
+            models['RNN'] = rnn_model
+        else:
+            print(f"Warning: RNN model file not found at {rnn_save_path}")    
 
-    transformer_model = TransformerModel(
-        config.VOCAB_SIZE, 
-        config.EMBEDDING_DIM, 
-        config.HIDDEN_DIM,
-        nhead=config.TRANSFORMER_HEADS,
-        num_layers=config.TRANSFORMER_LAYERS,
-        dropout=config.DROPOUT
-    ).to(config.DEVICE)
-
-    # Define model paths
-    rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-    lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-    transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-
-    # Load trained weights if available
-    # if os.path.exists(rnn_save_path):
-    #     rnn_model.load_state_dict(torch.load(rnn_save_path, map_location=config.DEVICE))
-    #     print(f"Loaded RNN model from {rnn_save_path}")
-    # else:
-    #     print(f"Warning: RNN model file not found at {rnn_save_path}")
-
-    # if os.path.exists(lstm_save_path):
-    #     lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
-    #     print(f"Loaded LSTM model from {lstm_save_path}")
-    # else:
-    #     print(f"Warning: LSTM model file not found at {lstm_save_path}")
-
-    if os.path.exists(transformer_save_path):
-        transformer_model.load_state_dict(torch.load(transformer_save_path, map_location=config.DEVICE))
-        print(f"Loaded Transformer model from {transformer_save_path}")
-    else:
-        print(f"Warning: Transformer model file not found at {transformer_save_path}")
+    # Load LSTM model
+    if model_type == 0 or model_type == 2:
+        lstm_model = LSTMModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            num_layers=config.LSTM_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
+        if os.path.exists(lstm_save_path):
+            lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
+            print(f"Loaded LSTM model from {lstm_save_path}")
+            models['LSTM'] = lstm_model
+        else:
+            print(f"Warning: LSTM model file not found at {lstm_save_path}")
     
-
-
-    # # Add this to your load_trained_models function after loading the model
-    # print("\nChecking model weights:")
-    # # Check embedding weights
-    # embed_norm = torch.norm(rnn_model.embedding.weight).item()
-    # print(f"Embedding weights norm: {embed_norm:.4f}")
-
-    # # Check output layer weights
-    # output_norm = torch.norm(rnn_model.fc.weight).item()
-    # print(f"Output layer weights norm: {output_norm:.4f}")
-
-    # # Check if weights are mostly zeros or very small
-    # zero_count = (torch.abs(rnn_model.fc.weight) < 1e-6).sum().item()
-    # total_count = rnn_model.fc.weight.numel()
-    # print(f"Near-zero weights in output layer: {zero_count}/{total_count} ({zero_count/total_count*100:.2f}%)")
-
+    # Load Transformer model
+    if model_type == 0 or model_type == 3:
+        transformer_model = TransformerModel(
+            config.VOCAB_SIZE, 
+            config.EMBEDDING_DIM, 
+            config.HIDDEN_DIM,
+            nhead=config.TRANSFORMER_HEADS,
+            num_layers=config.TRANSFORMER_LAYERS,
+            dropout=config.DROPOUT
+        ).to(config.DEVICE)
+        
+        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
+        if os.path.exists(transformer_save_path):
+            transformer_model.load_state_dict(torch.load(transformer_save_path, map_location=config.DEVICE))
+            print(f"Loaded Transformer model from {transformer_save_path}")
+            models['Transformer'] = transformer_model
+        else:
+            print(f"Warning: Transformer model file not found at {transformer_save_path}")
 
     # Set models to evaluation mode
-    # rnn_model.eval()
-    # lstm_model.eval()
-    transformer_model.eval()
+    for model in models.values():
+        model.eval()
 
-    # Create models dictionary
-    models = {
-        # 'RNN': rnn_model,
-        # 'LSTM': lstm_model,
-        'Transformer': transformer_model
-    }
-
-    return models, test_dataloader, tokenizer  # !/usr/bin/env python
+    return models, test_dataloader, tokenizer
 
 
 def test_token_generation(model, tokenizer, device):
@@ -317,6 +298,7 @@ def main():
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for sampling')
     parser.add_argument('--max_length', type=int, default=100, help='Maximum length to generate')
     parser.add_argument('--seed', type=int, default=config.RANDOM_SEED, help='Random seed')
+    parser.add_argument('--model_type', type=int, default=config.MODEL_TYPE, help='Model type (0=all, 1=rnn, 2=lstm, 3=transformer)')
     args = parser.parse_args()
 
     # Set random seed for reproducibility
@@ -328,30 +310,38 @@ def main():
     # Print device information
     print(f"Using device: {config.DEVICE}")
 
+    # Validate model_type
+    if args.model_type not in [0, 1, 2, 3]:
+        print(f"Error: Invalid model_type {args.model_type}. Must be 0 (all), 1 (RNN), 2 (LSTM), or 3 (Transformer).")
+        return
+
     # Train or load models
     if args.train:
-        models, losses = train_models()
+        models, losses = train_models(args.model_type) # models, losses, test_dataloader, tokenizer = train_models(args.model_type)
 
         # Plot loss curves
         print("\nPlotting loss curves...")
-        save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
-        transformer_train_losses, transformer_val_losses = losses['Transformer']
+        # plot_all_models_loss(losses, config.PLOT_DIR)
+        # save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
+        # transformer_train_losses, transformer_val_losses = losses['Transformer']
 
-        plot_loss_curves(
-            transformer_train_losses,
-            transformer_val_losses,
-            "Transformer Model Loss",
-            save_path
-        )
+        # plot_loss_curves(
+        #     transformer_train_losses,
+        #     transformer_val_losses,
+        #     "Transformer Model Loss",
+        #     save_path
+        # )
 
         # Evaluate models if requested
         if args.evaluate:
             print("\nEvaluating models...")
+            # evaluate_models(models, test_dataloader, tokenizer)
 
     # Only evaluate pre-trained models
     elif args.evaluate:
-        models, test_dataloader, tokenizer = load_trained_models()
+        models, test_dataloader, tokenizer = load_trained_models(args.model_type)
         print("\nEvaluating models...")
+        # evaluate_models(models, test_dataloader, tokenizer)
 
     # Generate text from a prompt
     elif args.generate:
@@ -359,7 +349,11 @@ def main():
             print("Error: Please provide a prompt with --prompt")
             return
 
-        models, _, tokenizer = load_trained_models()
+        models, _, tokenizer = load_trained_models(args.model_type)
+
+        if not models:
+            print("Error: No models loaded. Make sure the model files exist.")
+            return
 
         # test_sentences = [
         #     "The quick brown fox jumps over the lazy dog.",
