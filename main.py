@@ -16,7 +16,8 @@ from src.models.lstm_model import LSTMModel
 from src.models.rnn_model import RNNModel
 from src.models.transformer_model import TransformerModel
 from src.training.trainer import ModelTrainer
-from src.visualization.loss_plots import plot_loss_curves
+from src.visualization.loss_plots import plot_all_models_loss, plot_metrics_comparison
+from src.evaluation.metrics import compare_models
 
 
 def set_seed(seed: int) -> None:
@@ -253,6 +254,48 @@ def load_trained_models(model_type=0) -> Tuple[Dict[str, Any], torch.utils.data.
     return models, test_dataloader, tokenizer
 
 
+def evaluate_models(models, test_dataloader, tokenizer):
+    """
+    Evaluate models and generate visualizations.
+    
+    Args:
+        models: Dictionary mapping model names to model instances
+        test_dataloader: Test data loader
+        tokenizer: SentencePiece tokenizer
+    """
+    # Define prompts for generation
+    dog_cat_prompt = "Which do you prefer? Dogs or cats?"
+    custom_prompt = "The future of artificial intelligence depends on"
+    
+    # Compare models
+    print("\nEvaluating models...")
+    comparison_results = compare_models(
+        models,
+        test_dataloader,
+        tokenizer,
+        [dog_cat_prompt, custom_prompt]
+    )
+    
+    # Plot metric comparisons
+    print("\nGenerating comparison plots...")
+    metrics = {
+        'perplexity': comparison_results['perplexity'],
+        'bleu': comparison_results['bleu']
+    }
+    plot_metrics_comparison(metrics, config.PLOT_DIR)
+    
+    # Print summary table
+    print("\nResults Summary:")
+    print("-" * 60)
+    print(f"{'Model':<15}{'Perplexity':<15}{'BLEU Score':<15}")
+    print("-" * 60)
+    for model_name in models.keys():
+        ppl = metrics['perplexity'][model_name]
+        bleu = metrics['bleu'][model_name]
+        print(f"{model_name:<15}{ppl:<15.4f}{bleu:<15.4f}")
+    print("-" * 60)
+
+
 def test_token_generation(model, tokenizer, device):
     """Test token generation directly."""
     # Create a simple input
@@ -321,7 +364,7 @@ def main():
 
         # Plot loss curves
         print("\nPlotting loss curves...")
-        # plot_all_models_loss(losses, config.PLOT_DIR)
+        plot_all_models_loss(losses, config.PLOT_DIR)
         # save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
         # transformer_train_losses, transformer_val_losses = losses['Transformer']
 
@@ -335,13 +378,13 @@ def main():
         # Evaluate models if requested
         if args.evaluate:
             print("\nEvaluating models...")
-            # evaluate_models(models, test_dataloader, tokenizer)
+            evaluate_models(models, test_dataloader, tokenizer)
 
     # Only evaluate pre-trained models
     elif args.evaluate:
         models, test_dataloader, tokenizer = load_trained_models(args.model_type)
         print("\nEvaluating models...")
-        # evaluate_models(models, test_dataloader, tokenizer)
+        evaluate_models(models, test_dataloader, tokenizer)
 
     # Generate text from a prompt
     elif args.generate:
