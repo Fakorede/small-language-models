@@ -57,7 +57,7 @@ class LSTMModel(BaseModel):
                 temperature: float = 1.0,
                 hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Forward pass of the LSTM model.
+        Forward pass through the LSTM model.
         
         Args:
             input_ids: Token IDs of shape (batch_size, seq_len)

@@ -23,7 +23,7 @@ MAX_SEQ_LENGTH = 512
 TRAIN_FILE = DATA_DIR / "train.jsonl"
 TEST_FILE = DATA_DIR / "test.jsonl"
 
-# Model parameters
+# Common Model Configuration
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
 NUM_LAYERS = 2
