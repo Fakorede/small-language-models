@@ -1,445 +1,293 @@
+#!/usr/bin/env python
 """
-Main script for text generation model training and evaluation.
+Main entry point script for training, evaluating and generating text from language models.
 """
-import os
-import torch
-import random
-import numpy as np
 import argparse
-from typing import Dict, Any, List, Tuple
+import logging
+import nltk
+import os
+import sys
+import json
+import torch
+from pathlib import Path
+from typing import Dict, List, Optional
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 # Import project modules
-import config
-from src.data.tokenizer import load_or_train_tokenizer
-from src.data.dataset import create_dataloaders, read_jsonl_file
-from src.models.lstm_model import LSTMModel
+from config import (
+    DATA_DIR, MODELS_DIR, PLOTS_DIR, TRAIN_FILE, TEST_FILE,
+    EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS, VOCAB_SIZE,
+    ALL_MODELS, RNN_MODEL, LSTM_MODEL, TRANSFORMER_MODEL,
+    MODEL_NAMES, DEVICE, MAX_GENERATION_LENGTH, TEMPERATURE, TOKENIZER_MODEL_PREFIX
+)
+from src.data.tokenizer import Tokenizer
+from src.data.dataset import create_dataloaders
 from src.models.rnn_model import RNNModel
+from src.models.lstm_model import LSTMModel
 from src.models.transformer_model import TransformerModel
-from src.training.trainer import ModelTrainer
-from src.visualization.loss_plots import plot_all_models_loss, plot_metrics_comparison
-from src.evaluation.metrics import compare_models
+from src.training.trainer import Trainer
+from src.evaluation.metrics import evaluate_model, save_metrics
+from src.visualization.loss_plots import plot_training_curves, plot_all_metrics
 
-
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def ensure_dirs() -> None:
-    """Ensure all required directories exist."""
-    os.makedirs(config.MODEL_DIR, exist_ok=True)
-    os.makedirs(config.PLOT_DIR, exist_ok=True)
-    os.makedirs(os.path.dirname(config.TOKENIZER_MODEL_PREFIX), exist_ok=True)
-
-
-def train_models(model_type=0) -> Tuple[Dict[str, Any], Dict[str, Tuple[List[float], List[float]]]]:
-    """
-    Train models based on the specified model type.
-
-    Returns:
-        Tuple of (models_dict, losses_dict)
-    """
-    # Load and prepare data
-    print("\nLoading and preparing data...")
-
-    # Train or load tokenizer
-    tokenizer = load_or_train_tokenizer(
-        config.RAW_DIR,
-        config.VOCAB_SIZE,
-        config.TOKENIZER_MODEL_PREFIX
-    )
-
-    # Read training and testing data
-    train_data = read_jsonl_file(config.TRAIN_FILE)
-    test_data = read_jsonl_file(config.TEST_FILE)
-
-    # Create dataloaders
-    train_dataloader, val_dataloader, test_dataloader = create_dataloaders(
-        train_data,
-        test_data,
-        tokenizer,
-        config.BATCH_SIZE,
-        config.DEVICE,
-        config.TRAIN_VAL_SPLIT
-    )
-
-    # Initialize models
-    print("\nInitializing models...")
-
-    models = {}
-    losses = {}
-
-    # Train models based on the model type
-    if model_type == 0 or model_type == 1:
-        # Train RNN model
-        print("\nTraining RNN model...")
-        rnn_model = RNNModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.RNN_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-        rnn_trainer = ModelTrainer(
-            rnn_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=rnn_save_path,
-            device=config.DEVICE
-        )
-        rnn_train_losses, rnn_val_losses = rnn_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-        
-        models['RNN'] = rnn_model
-        losses['RNN'] = (rnn_train_losses, rnn_val_losses)
-
-    if model_type == 0 or model_type == 2:
-        # Train LSTM model
-        print("\nTraining LSTM model...")
-        lstm_model = LSTMModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.LSTM_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-        lstm_trainer = ModelTrainer(
-            lstm_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=lstm_save_path,
-            device=config.DEVICE
-        )
-        lstm_train_losses, lstm_val_losses = lstm_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-        
-        models['LSTM'] = lstm_model
-        losses['LSTM'] = (lstm_train_losses, lstm_val_losses)
-
-    if model_type == 0 or model_type == 3:
-        # Train Transformer model
-        print("\nTraining Transformer model...")
-        transformer_model = TransformerModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            nhead=config.TRANSFORMER_HEADS,
-            num_layers=config.TRANSFORMER_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-        transformer_trainer = ModelTrainer(
-            transformer_model,
-            train_dataloader,
-            val_dataloader,
-            learning_rate=config.LEARNING_RATE,
-            model_save_path=transformer_save_path,
-            device=config.DEVICE
-        )
-        transformer_train_losses, transformer_val_losses = transformer_trainer.train(
-            config.NUM_EPOCHS,
-            early_stopping_patience=config.EARLY_STOPPING_PATIENCE
-        )
-
-        models['Transformer'] = transformer_model
-        losses['Transformer'] = (transformer_train_losses, transformer_val_losses)
-
-    return models, losses #, test_dataloader, tokenizer
-
-
-def load_trained_models(model_type=0) -> Tuple[Dict[str, Any], torch.utils.data.DataLoader, Any]:
-    """
-    Load pre-trained models based on the specified model type.
-
-    Returns:
-        Tuple of (models_dict, test_dataloader, tokenizer)
-    """
-    # Load tokenizer
-    tokenizer = load_or_train_tokenizer(
-        config.RAW_DIR,
-        config.VOCAB_SIZE,
-        config.TOKENIZER_MODEL_PREFIX
-    )
-
-    # Read testing data
-    test_data = read_jsonl_file(config.TEST_FILE)
-
-    # Create test dataloader (with dummy train/val data)
-    _, _, test_dataloader = create_dataloaders(
-        test_data,  # We're not using train data here, but the function requires it
-        test_data,
-        tokenizer,
-        config.BATCH_SIZE,
-        config.DEVICE,
-        config.TRAIN_VAL_SPLIT
-    )
-
-    # Initialize models dictionary
-    models = {}
-
-    # Load RNN model
-    if model_type == 0 or model_type == 1:
-        rnn_model = RNNModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.RNN_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        rnn_save_path = os.path.join(config.MODEL_DIR, "rnn_model.pt")
-        if os.path.exists(rnn_save_path):
-            rnn_model.load_state_dict(torch.load(rnn_save_path, map_location=config.DEVICE))
-            print(f"Loaded RNN model from {rnn_save_path}")
-            models['RNN'] = rnn_model
-        else:
-            print(f"Warning: RNN model file not found at {rnn_save_path}")    
-
-    # Load LSTM model
-    if model_type == 0 or model_type == 2:
-        lstm_model = LSTMModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            num_layers=config.LSTM_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        lstm_save_path = os.path.join(config.MODEL_DIR, "lstm_model.pt")
-        if os.path.exists(lstm_save_path):
-            lstm_model.load_state_dict(torch.load(lstm_save_path, map_location=config.DEVICE))
-            print(f"Loaded LSTM model from {lstm_save_path}")
-            models['LSTM'] = lstm_model
-        else:
-            print(f"Warning: LSTM model file not found at {lstm_save_path}")
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Language Model Training and Evaluation")
     
-    # Load Transformer model
-    if model_type == 0 or model_type == 3:
-        transformer_model = TransformerModel(
-            config.VOCAB_SIZE, 
-            config.EMBEDDING_DIM, 
-            config.HIDDEN_DIM,
-            nhead=config.TRANSFORMER_HEADS,
-            num_layers=config.TRANSFORMER_LAYERS,
-            dropout=config.DROPOUT
-        ).to(config.DEVICE)
-        
-        transformer_save_path = os.path.join(config.MODEL_DIR, "transformer_model.pt")
-        if os.path.exists(transformer_save_path):
-            transformer_model.load_state_dict(torch.load(transformer_save_path, map_location=config.DEVICE))
-            print(f"Loaded Transformer model from {transformer_save_path}")
-            models['Transformer'] = transformer_model
-        else:
-            print(f"Warning: Transformer model file not found at {transformer_save_path}")
+    # Operation modes
+    parser.add_argument("--train", action="store_true", help="Train the model(s)")
+    parser.add_argument("--evaluate", action="store_true", help="Evaluate the model(s)")
+    parser.add_argument("--generate", action="store_true", help="Generate text from a model")
+    
+    # Model selection
+    parser.add_argument("--model_type", type=int, default=0, choices=[0, 1, 2, 3],
+                       help="Model type: 0=All, 1=RNN, 2=LSTM, 3=Transformer")
+    
+    # Generation parameters
+    parser.add_argument("--prompt", type=str, default="",
+                       help="Prompt for text generation")
+    parser.add_argument("--temperature", type=float, default=TEMPERATURE,
+                       help="Temperature for sampling")
+    parser.add_argument("--max_length", type=int, default=MAX_GENERATION_LENGTH,
+                       help="Maximum length of generated text")
+    
+    return parser.parse_args()
 
-    # Set models to evaluation mode
-    for model in models.values():
-        model.eval()
-
-    return models, test_dataloader, tokenizer
-
-
-def evaluate_models(models, test_dataloader, tokenizer):
+def create_model(model_type: int, tokenizer: Tokenizer) -> torch.nn.Module:
     """
-    Evaluate models and generate visualizations.
+    Create a model of the specified type.
     
     Args:
-        models: Dictionary mapping model names to model instances
-        test_dataloader: Test data loader
-        tokenizer: SentencePiece tokenizer
+        model_type: Type of model to create
+        tokenizer: Tokenizer instance
+        
+    Returns:
+        The created model
     """
-    # Define prompts for generation
-    dog_cat_prompt = "Which do you prefer? Dogs or cats?"
-    custom_prompt = "The future of artificial intelligence depends on"
+    vocab_size = tokenizer.get_vocab_size()
     
-    # Compare models
-    print("\nEvaluating models...")
-    comparison_results = compare_models(
-        models,
-        test_dataloader,
-        tokenizer,
-        [dog_cat_prompt, custom_prompt]
+    if model_type == RNN_MODEL:
+        logger.info("Creating RNN model")
+        return RNNModel(
+            vocab_size=vocab_size,
+            embedding_dim=EMBEDDING_DIM,
+            hidden_dim=HIDDEN_DIM,
+            num_layers=NUM_LAYERS,
+            tokenizer=tokenizer
+        )
+    elif model_type == LSTM_MODEL:
+        logger.info("Creating LSTM model")
+        return LSTMModel(
+            vocab_size=vocab_size,
+            embedding_dim=EMBEDDING_DIM,
+            hidden_dim=HIDDEN_DIM,
+            num_layers=NUM_LAYERS,
+            tokenizer=tokenizer
+        )
+    elif model_type == TRANSFORMER_MODEL:
+        logger.info("Creating Transformer model")
+        return TransformerModel(
+            vocab_size=vocab_size,
+            embedding_dim=EMBEDDING_DIM,
+            hidden_dim=HIDDEN_DIM,
+            num_layers=NUM_LAYERS,
+            tokenizer=tokenizer
+        )
+    else:
+        raise ValueError(f"Invalid model type: {model_type}")
+
+def train_models(model_types: List[int], tokenizer: Tokenizer):
+    """
+    Train the specified models.
+    
+    Args:
+        model_types: List of model types to train
+        tokenizer: Tokenizer instance
+    """
+    # Create dataloaders
+    train_dataloader, val_dataloader = create_dataloaders(
+        train_file=TRAIN_FILE,
+        test_file=TEST_FILE,
+        tokenizer=tokenizer
     )
     
-    # Plot metric comparisons
-    print("\nGenerating comparison plots...")
-    metrics = {
-        'perplexity': comparison_results['perplexity'],
-        'bleu': comparison_results['bleu']
-    }
-    plot_metrics_comparison(metrics, config.PLOT_DIR)
-    
-    # Print summary table
-    print("\nResults Summary:")
-    print("-" * 60)
-    print(f"{'Model':<15}{'Perplexity':<15}{'BLEU Score':<15}")
-    print("-" * 60)
-    for model_name in models.keys():
-        ppl = metrics['perplexity'][model_name]
-        bleu = metrics['bleu'][model_name]
-        print(f"{model_name:<15}{ppl:<15.4f}{bleu:<15.4f}")
-    print("-" * 60)
+    # Train each model
+    for model_type in model_types:
+        model = create_model(model_type, tokenizer)
+        model_name = MODEL_NAMES[model_type]
+        
+        trainer = Trainer(
+            model=model,
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            model_name=model_name
+        )
+        
+        # Train model
+        metrics = trainer.train()
+        
+        # Plot training curves
+        plot_training_curves(
+            train_losses=metrics['train_loss'],
+            val_losses=metrics['val_loss'],
+            model_name=model_name
+        )
+        
+        logger.info(f"Finished training {model_name}")
 
+def evaluate_models(model_types: List[int], tokenizer: Tokenizer):
+    """
+    Evaluate the specified models.
+    
+    Args:
+        model_types: List of model types to evaluate
+        tokenizer: Tokenizer instance
+    """
+    # Create dataloaders
+    _, test_dataloader = create_dataloaders(
+        train_file=TRAIN_FILE,
+        test_file=TEST_FILE,
+        tokenizer=tokenizer
+    )
+    
+    # Example prompts for generation
+    prompts = [
+        "Which do you prefer? Dogs or cats?",
+        "Once upon a time in a land far away",
+        "The quick brown fox jumps over"
+    ]
+    
+    # Evaluate each model
+    all_metrics = {}
+    
+    for model_type in model_types:
+        model_name = MODEL_NAMES[model_type]
+        model_path = MODELS_DIR / f"{model_name}_best.pt"
+        
+        if not model_path.exists():
+            logger.warning(f"Model {model_name} not found at {model_path}, skipping evaluation")
+            continue
+        
+        # Load model
+        if model_type == RNN_MODEL:
+            model = RNNModel.load(model_path, tokenizer)
+        elif model_type == LSTM_MODEL:
+            model = LSTMModel.load(model_path, tokenizer)
+        elif model_type == TRANSFORMER_MODEL:
+            model = TransformerModel.load(model_path, tokenizer)
+        
+        # Evaluate model
+        metrics = evaluate_model(model, test_dataloader, prompts)
+        all_metrics[model_name] = metrics
+        
+        logger.info(f"Finished evaluating {model_name}")
+    
+    # Save metrics
+    if all_metrics:
+        metrics_path = MODELS_DIR / "evaluation_metrics.json"
+        save_metrics(all_metrics, metrics_path)
+        
+        # Generate comparison plots
+        plot_all_metrics(metrics_path)
+    else:
+        logger.warning("No models were evaluated")
 
-def test_token_generation(model, tokenizer, device):
-    """Test token generation directly."""
-    # Create a simple input
-    test_text = "the cat sat on the"
-    test_ids = tokenizer.encode(test_text, out_type=int)
-    input_tensor = torch.tensor([test_ids], dtype=torch.long).to(device)
+def generate_text(model_type: int, prompt: str, temperature: float, max_length: int, tokenizer: Tokenizer):
+    """
+    Generate text from the specified model.
     
-    print(f"\nTesting with input: '{test_text}'")
-    print(f"Input tensor shape: {input_tensor.shape}")
+    Args:
+        model_type: Type of model to use
+        prompt: Prompt for text generation
+        temperature: Temperature for sampling
+        max_length: Maximum length of generated text
+        tokenizer: Tokenizer instance
+    """
+    model_name = MODEL_NAMES[model_type]
+    model_path = MODELS_DIR / f"{model_name}_best.pt"
     
-    # Run forward pass
-    model.eval()
-    with torch.no_grad():
-        logits, _, _ = model(input_tensor)
+    if not model_path.exists():
+        logger.error(f"Model {model_name} not found at {model_path}")
+        return
     
-    # Get predictions for last token
-    last_token_logits = logits[0, -1, :]
+    # Load model
+    if model_type == RNN_MODEL:
+        model = RNNModel.load(model_path, tokenizer)
+    elif model_type == LSTM_MODEL:
+        model = LSTMModel.load(model_path, tokenizer)
+    elif model_type == TRANSFORMER_MODEL:
+        model = TransformerModel.load(model_path, tokenizer)
     
-    # Get top 10 predictions
-    probs = torch.softmax(last_token_logits, dim=-1)
-    top_k = torch.topk(probs, 10)
+    # Generate text
+    generated_text = model.generate(prompt, max_length, temperature)
     
-    print("\nTop 10 next token predictions:")
-    for i, (idx, prob) in enumerate(zip(top_k.indices.cpu().numpy(), top_k.values.cpu().numpy())):
-        try:
-            token_text = tokenizer.IdToPiece(int(idx))
-            print(f"{i+1}. Token ID {idx}: '{token_text}' (Prob: {prob:.4f})")
-        except Exception as e:
-            print(f"{i+1}. Token ID {idx}: [Error decoding token: {e}] (Prob: {prob:.4f})")
-
-    generated = model.prompt(tokenizer, test_text, config.DEFAULT_MAX_GEN_LENGTH, config.DEFAULT_TEMPERATURE)
-    print("CHECKED!")
-
+    print("\nGenerated Text:")
+    print(f"Prompt: {prompt}")
+    print(f"Generated: {generated_text}")
 
 def main():
     """Main function."""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Text Generation with RNN, LSTM, and Transformer')
-    parser.add_argument('--train', action='store_true', help='Train models')
-    parser.add_argument('--evaluate', action='store_true', help='Evaluate models')
-    parser.add_argument('--generate', action='store_true', help='Generate text')
-    parser.add_argument('--prompt', type=str, help='Text prompt for generation')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for sampling')
-    parser.add_argument('--max_length', type=int, default=100, help='Maximum length to generate')
-    parser.add_argument('--seed', type=int, default=config.RANDOM_SEED, help='Random seed')
-    parser.add_argument('--model_type', type=int, default=config.MODEL_TYPE, help='Model type (0=all, 1=rnn, 2=lstm, 3=transformer)')
-    args = parser.parse_args()
-
-    # Set random seed for reproducibility
-    set_seed(args.seed)
-
-    # Ensure required directories exist
-    ensure_dirs()
-
-    # Print device information
-    print(f"Using device: {config.DEVICE}")
-
-    # Validate model_type
-    if args.model_type not in [0, 1, 2, 3]:
-        print(f"Error: Invalid model_type {args.model_type}. Must be 0 (all), 1 (RNN), 2 (LSTM), or 3 (Transformer).")
-        return
-
-    # Train or load models
-    if args.train:
-        models, losses = train_models(args.model_type) # models, losses, test_dataloader, tokenizer = train_models(args.model_type)
-
-        # Plot loss curves
-        print("\nPlotting loss curves...")
-        plot_all_models_loss(losses, config.PLOT_DIR)
-        # save_path = os.path.join(config.PLOT_DIR, "transformer_loss.png")
-        # transformer_train_losses, transformer_val_losses = losses['Transformer']
-
-        # plot_loss_curves(
-        #     transformer_train_losses,
-        #     transformer_val_losses,
-        #     "Transformer Model Loss",
-        #     save_path
-        # )
-
-        # Evaluate models if requested
-        if args.evaluate:
-            print("\nEvaluating models...")
-            evaluate_models(models, test_dataloader, tokenizer)
-
-    # Only evaluate pre-trained models
-    elif args.evaluate:
-        models, test_dataloader, tokenizer = load_trained_models(args.model_type)
-        print("\nEvaluating models...")
-        evaluate_models(models, test_dataloader, tokenizer)
-
-    # Generate text from a prompt
-    elif args.generate:
-        if not args.prompt:
-            print("Error: Please provide a prompt with --prompt")
-            return
-
-        models, _, tokenizer = load_trained_models(args.model_type)
-
-        if not models:
-            print("Error: No models loaded. Make sure the model files exist.")
-            return
-
-        # test_sentences = [
-        #     "The quick brown fox jumps over the lazy dog.",
-        #     "Hello, world! How are you doing today?",
-        #     "Once upon a time in a land far, far away."
-        # ]
-
-        # for sentence in test_sentences:
-        #     encoded = tokenizer.encode(sentence, out_type=int)
-        #     decoded = tokenizer.decode(encoded)
-        #     print(f"Original: '{sentence}'")
-        #     print(f"Encoded: {encoded}")
-        #     print(f"Decoded: '{decoded}'")
-        #     print()
-
-        # print("\nTokenizer information:")
-        # print(f"Pad ID: {tokenizer.pad_id()}")
-        # print(f"Unknown ID: {tokenizer.unk_id()}")
-        # print(f"BOS ID: {tokenizer.bos_id()}")
-        # print(f"EOS ID: {tokenizer.eos_id()}")
-        # print(f"Vocab size: {tokenizer.get_piece_size()}")
-
-        # # Test token generation directly
-        # print("\nTesting token generation with RNN model")
-        # test_token_generation(models['RNN'], tokenizer, config.DEVICE)
-
-        print(f"\nGenerating text with prompt: '{args.prompt}'")
-        print(f"Temperature: {args.temperature}, Max Length: {args.max_length}")
-
-        for name, model in models.items():
-            generated = model.prompt(
-                tokenizer,
-                args.prompt,
-                max_seq_length=args.max_length,
-                temperature=args.temperature
-            )
-            print(f"\n{name} Model:")
-            print(f"'{generated}'")
-
-    # If no action specified, print help
+    # Parse arguments
+    args = parse_args()
+    
+    # Check that at least one operation is specified
+    if not (args.train or args.evaluate or args.generate):
+        logger.error("Please specify at least one operation: --train, --evaluate, or --generate")
+        sys.exit(1)
+    
+    # Ensure directories exist
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+    
+    # Initialize tokenizer
+    tokenizer = Tokenizer(TOKENIZER_MODEL_PREFIX)
+    
+    # Check if tokenizer needs to be trained
+    if not tokenizer.model_path.exists():
+        logger.info("Training tokenizer")
+        tokenizer.train()
+    
+    # Determine which models to process
+    if args.model_type == ALL_MODELS:
+        model_types = [RNN_MODEL, LSTM_MODEL, TRANSFORMER_MODEL]
     else:
-        parser.print_help()
+        model_types = [args.model_type]
+    
+    # Perform operations
+    if args.train:
+        train_models(model_types, tokenizer)
+    
+    if args.evaluate:
+        try:
+            nltk.download('punkt', quiet=False)
+        except Exception as e:
+            logger.warning(f"Warning: Failed to download NLTK data: {e}")
+            logger.warning("BLEU score calculation may use fallback tokenizer")
 
+        evaluate_models(model_types, tokenizer)
+    
+    if args.generate:
+        if not args.prompt:
+            logger.error("Please specify a prompt with --prompt")
+            sys.exit(1)
+        
+        if args.model_type == ALL_MODELS:
+            logger.error("Please specify a single model type for text generation")
+            sys.exit(1)
+        
+        generate_text(
+            model_type=args.model_type,
+            prompt=args.prompt,
+            temperature=args.temperature,
+            max_length=args.max_length,
+            tokenizer=tokenizer
+        )
 
 if __name__ == "__main__":
     main()

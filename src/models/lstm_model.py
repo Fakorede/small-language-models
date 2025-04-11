@@ -1,131 +1,93 @@
 """
-LSTM model implementation for text generation.
+LSTM model implementation.
 """
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, List, Any
+from typing import Tuple, Optional
 
-from src.models.base_model import BaseTextGenerationModel
+from src.models.base_model import BaseModel
+from src.data.tokenizer import Tokenizer
+from config import DEVICE, DROPOUT, NUM_LAYERS
 
-
-class LSTMModel(BaseTextGenerationModel):
-    """LSTM model for text generation."""
-    
-    def __init__(
-        self, 
-        vocab_size: int, 
-        embedding_dim: int, 
-        hidden_dim: int, 
-        num_layers: int = 2, 
-        dropout: float = 0.2
-    ):
+class LSTMModel(BaseModel):
+    """
+    LSTM-based language model.
+    """
+    def __init__(self, 
+                 vocab_size: int, 
+                 embedding_dim: int, 
+                 hidden_dim: int,
+                 num_layers: int = NUM_LAYERS,
+                 dropout: float = DROPOUT,
+                 tokenizer: Tokenizer = None):
         """
         Initialize the LSTM model.
         
         Args:
             vocab_size: Size of the vocabulary
-            embedding_dim: Dimension of token embeddings
-            hidden_dim: Dimension of hidden states
+            embedding_dim: Dimension of the embedding layer
+            hidden_dim: Dimension of the hidden layers
             num_layers: Number of LSTM layers
-            dropout: Dropout rate
+            dropout: Dropout probability
+            tokenizer: Tokenizer instance for encoding/decoding text
         """
-        super(LSTMModel, self).__init__(vocab_size, embedding_dim, hidden_dim)
+        super().__init__(vocab_size, embedding_dim, hidden_dim, tokenizer)
         
-        # LSTM specific layers
+        self.num_layers = num_layers
+        self.dropout_rate = dropout
+        
+        # LSTM layers
         self.lstm = nn.LSTM(
             input_size=embedding_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=False
         )
+        
         self.dropout = nn.Dropout(dropout)
         
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
-        temperature: float = 1.0
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        # Move model to device
+        self.to(DEVICE)
+    
+    def forward(self, 
+                input_ids: torch.Tensor, 
+                attention_mask: Optional[torch.Tensor] = None,
+                temperature: float = 1.0,
+                hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass of the LSTM model.
         
         Args:
-            x: Input tensor of token indices [batch_size, seq_len]
-            hidden: Optional tuple of (hidden_state, cell_state)
-            temperature: Temperature for sampling (1.0 means greedy)
+            input_ids: Token IDs of shape (batch_size, seq_len)
+            attention_mask: Attention mask of shape (batch_size, seq_len)
+            temperature: Temperature for sampling (not used in forward pass)
+            hidden_state: Optional hidden state from previous call (h0, c0)
             
         Returns:
-            Tuple of (logits, (hidden_state, cell_state), next_token)
+            Tuple of (logits, hidden_state)
+            - hidden_state is a tuple of (hidden, cell)
         """
-        embedded = self.dropout(self.embedding(x))
-        output, hidden = self.lstm(embedded, hidden)
-        output = self.dropout(output)
-        logits = self.fc(output)
+        # Get embeddings
+        embeddings = self.embedding(input_ids)  # (batch_size, seq_len, embedding_dim)
         
-        # Apply temperature scaling for sampling
-        if temperature != 1.0:
-            logits = logits / temperature
+        # Apply LSTM
+        lstm_output, hidden = self.lstm(embeddings, hidden_state)  # (batch_size, seq_len, hidden_dim)
         
-        # Sample the next token
-        # For undergrads, just take the highest probability token
-        if temperature == 1.0 or not self.training:
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-        else:
-            # Sample based on probabilities (for grad students)
-            probs = torch.softmax(logits[:, -1, :], dim=-1)
-            next_token = torch.multinomial(probs, 1).squeeze(-1)
+        # Apply dropout
+        lstm_output = self.dropout(lstm_output)
         
-        return logits, hidden, next_token
+        # Project to vocabulary
+        logits = self.output_layer(lstm_output)  # (batch_size, seq_len, vocab_size)
+        
+        return logits, hidden
     
-    def prompt(
-        self, 
-        tokenizer, 
-        prompt_text: str, 
-        max_seq_length: int = 100, 
-        temperature: float = 1.0
-    ) -> str:
+    def get_model_size(self) -> int:
         """
-        Generate text from a prompt.
+        Get the number of parameters in the model.
         
-        Args:
-            tokenizer: SentencePiece tokenizer
-            prompt_text: Text prompt to start generation
-            max_seq_length: Maximum number of tokens to generate
-            temperature: Temperature for sampling (1.0 means greedy)
-            
         Returns:
-            Generated text
+            Number of parameters
         """
-        self.eval()
-        device = next(self.parameters()).device
-        prompt_ids = tokenizer.encode(prompt_text, out_type=int)
-        input_ids = torch.tensor(prompt_ids, dtype=torch.long).unsqueeze(0).to(device)
-        
-        # Initialize hidden state
-        hidden = None
-        
-        # Store generated tokens
-        generated_ids = []
-        
-        # Generate tokens autoregressively
-        with torch.no_grad():
-            for _ in range(max_seq_length):
-                # Forward pass
-                logits, hidden, next_token = self.forward(input_ids, hidden, temperature)
-                
-                # Get the next token
-                next_token_id = next_token.item()
-                generated_ids.append(next_token_id)
-                
-                # Check for EOS token
-                if next_token_id == tokenizer.eos_id():
-                    break
-                
-                # Prepare next input (only use the last predicted token)
-                input_ids = next_token.unsqueeze(0)
-        
-        # Decode the generated tokens
-        generated_text = tokenizer.decode(generated_ids)
-        
-        return generated_text
+        return sum(p.numel() for p in self.parameters())

@@ -1,158 +1,174 @@
+"""
+Dataset and dataloader implementations
+"""
+import json
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
-import json
-import os
-from typing import Dict, List, Any, Tuple
+from typing import List, Dict, Tuple, Optional
+import logging
+from pathlib import Path
 
+from config import BATCH_SIZE, MAX_SEQ_LENGTH
+from src.data.tokenizer import Tokenizer
 
-class TextGenerationDataset(Dataset):
-    """Dataset and dataloader implementations for text generation tasks."""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, data: List[Dict[str, str]], tokenizer):
+class TextCompletionDataset(Dataset):
+    """
+    Dataset for text completion tasks, loading data from JSONL files.
+    """
+    def __init__(self, 
+                 file_path: Path, 
+                 tokenizer: Tokenizer,
+                 max_seq_length: int = MAX_SEQ_LENGTH):
         """
-        Initialize the dataset.
-
+        Initialize dataset from a JSONL file with prompt-completion pairs.
+        
         Args:
-            data: List of dictionaries with 'prompt' and 'completion' keys
-            tokenizer: SentencePiece tokenizer
+            file_path: Path to the JSONL file
+            tokenizer: Tokenizer instance for encoding text
+            max_seq_length: Maximum sequence length for truncation
         """
-        self.data = data
+        self.file_path = Path(file_path)
         self.tokenizer = tokenizer
-
+        self.max_seq_length = max_seq_length
+        self.examples = []
+        
+        self._load_data()
+    
+    def _load_data(self):
+        """Load and process data from the JSONL file."""
+        logger.info(f"Loading data from {self.file_path}")
+        
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                example = json.loads(line.strip())
+                
+                # Combine prompt and completion for training
+                prompt = example['prompt']
+                completion = example['completion']
+                
+                # Special handling for examples with BOS/EOS tags
+                if prompt.startswith("<bos>"):
+                    prompt = prompt[5:]  # Remove <bos> tag
+                    # Add BOS token at the beginning
+                    prompt_tokens = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt)
+                else:
+                    # Regular encoding
+                    prompt_tokens = self.tokenizer.encode(prompt)
+                
+                if completion.endswith("<eos>"):
+                    completion = completion[:-5]  # Remove <eos> tag
+                    # Add EOS token at the end
+                    completion_tokens = self.tokenizer.encode(completion) + [self.tokenizer.eos_id]
+                else:
+                    # Regular encoding
+                    completion_tokens = self.tokenizer.encode(completion)
+                
+                # Combine prompt and completion tokens
+                input_tokens = prompt_tokens + completion_tokens
+                
+                # Truncate if necessary
+                if len(input_tokens) > self.max_seq_length:
+                    input_tokens = input_tokens[:self.max_seq_length]
+                
+                # Create input and target sequences for next-token prediction
+                # For language modeling, target is input shifted by one position
+                x = input_tokens[:-1]
+                y = input_tokens[1:]
+                
+                self.examples.append({
+                    'input_ids': x,
+                    'target_ids': y,
+                    'prompt': prompt,
+                    'completion': completion,
+                    'length': len(x)
+                })
+        
+        logger.info(f"Loaded {len(self.examples)} examples from {self.file_path}")
+    
     def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Get a single item from the dataset.
-
-        Args:
-            idx: Index of the item
-
-        Returns:
-            Dictionary with 'input_ids', 'target_ids', and 'input_len' keys
-        """
-        item = self.data[idx]
-        prompt = item["prompt"]
-        completion = item["completion"]
-
-        # Tokenize the prompt and completion
-        prompt_ids = self.tokenizer.encode(prompt, out_type=int)
-        completion_ids = self.tokenizer.encode(completion, out_type=int)
-
-        # Convert to tensors
-        input_ids = torch.tensor(prompt_ids, dtype=torch.long)
-        target_ids = torch.tensor(completion_ids, dtype=torch.long)
-
-        return {
-            "input_ids": input_ids,
-            "target_ids": target_ids,
-            "input_len": len(input_ids)
-        }
+        """Return the number of examples in the dataset."""
+        return len(self.examples)
+    
+    def __getitem__(self, idx: int) -> Dict:
+        """Get a dataset example by index."""
+        return self.examples[idx]
 
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]], device: torch.device) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """
-    Custom collate function for padding sequences.
-
+    Collate function for DataLoader to create batches.
+    
     Args:
-        batch: List of dictionaries returned by __getitem__
-        device: Device to move tensors to
-
+        batch: List of dataset examples
+        
     Returns:
-        Dictionary with padded sequences
+        Dictionary of batched tensors
     """
-    input_ids = [item["input_ids"] for item in batch]
-    target_ids = [item["target_ids"] for item in batch]
-    input_lens = [item["input_len"] for item in batch]
-
-    # Pad sequences
-    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    target_ids = pad_sequence(target_ids, batch_first=True, padding_value=0)
-
+    # Get max length in the batch
+    max_len = max([example['length'] for example in batch])
+    
+    # Initialize tensors
+    input_ids = torch.zeros((len(batch), max_len), dtype=torch.long)
+    target_ids = torch.zeros((len(batch), max_len), dtype=torch.long)
+    attention_mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
+    
+    # Fill in the tensors
+    for i, example in enumerate(batch):
+        seq_len = example['length']
+        input_ids[i, :seq_len] = torch.tensor(example['input_ids'], dtype=torch.long)
+        target_ids[i, :seq_len] = torch.tensor(example['target_ids'], dtype=torch.long)
+        attention_mask[i, :seq_len] = 1
+    
     return {
-        "input_ids": input_ids.to(device),
-        "target_ids": target_ids.to(device),
-        "input_lens": torch.tensor(input_lens, dtype=torch.long).to(device)
+        'input_ids': input_ids,
+        'target_ids': target_ids,
+        'attention_mask': attention_mask,
+        'prompt': [example['prompt'] for example in batch],
+        'completion': [example['completion'] for example in batch]
     }
 
 
-def read_jsonl_file(file_path: str) -> List[Dict[str, str]]:
-    """
-    Read data from JSONL file.
-
-    Args:
-        file_path: Path to JSONL file
-
-    Returns:
-        List of dictionaries with 'prompt' and 'completion' keys
-    """
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as file:
-        for line in file:
-            data.append(json.loads(line))
-    return data
-
-
 def create_dataloaders(
-        train_data: List[Dict[str, str]],
-        test_data: List[Dict[str, str]],
-        tokenizer,
-        batch_size: int,
-        device: torch.device,
-        val_split: float = 0.1
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    train_file: Path,
+    test_file: Path,
+    tokenizer: Tokenizer,
+    batch_size: int = BATCH_SIZE,
+    max_seq_length: int = MAX_SEQ_LENGTH
+) -> Tuple[DataLoader, DataLoader]:
     """
-    Create train, validation, and test dataloaders.
-
+    Create training and test dataloaders.
+    
     Args:
-        train_data: Training data
-        test_data: Testing data
-        tokenizer: SentencePiece tokenizer
+        train_file: Path to the training file
+        test_file: Path to the test file
+        tokenizer: Tokenizer instance
         batch_size: Batch size
-        device: Device to move tensors to
-        val_split: Fraction of training data to use for validation
-
+        max_seq_length: Maximum sequence length
+        
     Returns:
-        Tuple of (train_dataloader, val_dataloader, test_dataloader)
+        Tuple of (train_dataloader, test_dataloader)
     """
-    import random
-
-    # Create a copy of train_data to avoid modifying the original
-    train_data = train_data.copy()
-
-    # Shuffle and split training data
-    random.shuffle(train_data)
-    val_size = int(val_split * len(train_data))
-    val_data = train_data[:val_size]
-    train_data = train_data[val_size:]
-
     # Create datasets
-    train_dataset = TextGenerationDataset(train_data, tokenizer)
-    val_dataset = TextGenerationDataset(val_data, tokenizer)
-    test_dataset = TextGenerationDataset(test_data, tokenizer)
-
-    # Create dataloaders with custom collate function
+    train_dataset = TextCompletionDataset(train_file, tokenizer, max_seq_length)
+    test_dataset = TextCompletionDataset(test_file, tokenizer, max_seq_length)
+    
+    # Create dataloaders
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, device)
+        collate_fn=collate_fn,
+        pin_memory=True
     )
-
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_fn(batch, device)
-    )
-
+    
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=lambda batch: collate_fn(batch, device)
+        collate_fn=collate_fn,
+        pin_memory=True
     )
-
-    return train_dataloader, val_dataloader, test_dataloader
+    
+    return train_dataloader, test_dataloader
