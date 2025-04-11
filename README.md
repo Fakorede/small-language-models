@@ -46,7 +46,7 @@ project/
 
 ```shell
 # create virtual environment
-$ conda create -n slm python=3.10 -y
+$ conda create -n slm77 python=3.10 -y
 
 # activate environment
 $ conda activate slm
@@ -121,7 +121,7 @@ To generate text from trained models:
 
 ```bash
 # Generate text using only the Transformer model
-python main.py --generate --prompt "Your prompt here" --model_type 3 --temperature 0.8 --max_length 100
+python main.py --generate --prompt "Which do you prefer? Dogs or cats?" --model_type 1 --temperature 0.8 --max_length 100
 ```
 
 Additional arguments:
@@ -134,7 +134,7 @@ Additional arguments:
 You can also combine operations:
 
 ```bash
-python main.py --train --evaluate
+python main.py --train --evaluate --model_type 0
 ```
 
 ## Configuration
@@ -145,17 +145,21 @@ Model hyperparameters and training settings can be modified in the `config.py` f
 # Model parameters
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
-RNN_LAYERS = 2
-LSTM_LAYERS = 2
-TRANSFORMER_LAYERS = 2
-TRANSFORMER_HEADS = 4
+NUM_LAYERS = 2
 DROPOUT = 0.2
+TRANSFORMER_HEADS = 8
 
 # Training parameters
 BATCH_SIZE = 128
-NUM_EPOCHS = 30
 LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.01
+NUM_EPOCHS = 30
 EARLY_STOPPING_PATIENCE = 3
+GRADIENT_CLIP_VAL = 1.0
+
+# Generation parameters
+TEMPERATURE = 0.8
+MAX_GENERATION_LENGTH = 100
 ```
 
 ## Results

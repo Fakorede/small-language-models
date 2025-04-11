@@ -1,65 +1,64 @@
 """
-Visualization utilities for training and evaluation.
+Visualization functions for training and evaluation metrics.
 """
-
-import os
-import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Optional
+import numpy as np
+import os
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Any
+import json
+import logging
 
-import sys
-sys.path.append("../..")
-import config
+from config import PLOTS_DIR
 
+logger = logging.getLogger(__name__)
 
-def plot_learning_curves(
-    train_losses: List[float],
-    val_losses: List[float],
-    title: str,
-    save_path: str
-):
+def plot_training_curves(train_losses: List[float],
+                         val_losses: List[float],
+                         model_name: str,
+                         output_dir: Path = PLOTS_DIR):
     """
     Plot training and validation loss curves.
     
     Args:
-        train_losses: List of training losses per epoch.
-        val_losses: List of validation losses per epoch.
-        title: Plot title.
-        save_path: Path to save the plot.
+        train_losses: List of training losses
+        val_losses: List of validation losses
+        model_name: Name of the model
+        output_dir: Directory to save the plot
     """
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Training Loss', marker='o')
-    plt.plot(val_losses, label='Validation Loss', marker='x')
-    plt.title(title)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    plt.title(f'{model_name} Training Curves')
     plt.legend()
     plt.grid(True)
     
-    # Save plot
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path)
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the plot
+    output_path = output_dir / f"{model_name}_training_curves.png"
+    plt.savefig(output_path)
     plt.close()
     
-    print(f"Loss plot saved to {save_path}")
+    logger.info(f"Training curves saved to {output_path}")
 
-
-def plot_metric_comparison(
-    metrics: Dict[str, Dict[str, float]],
-    metric_name: str,
-    title: str,
-    save_path: str,
-    is_lower_better: bool = True
-):
+def plot_comparison_metrics(metrics: Dict[str, Dict[str, float]],
+                            metric_name: str,
+                            title: str,
+                            ylabel: str,
+                            output_dir: Path = PLOTS_DIR):
     """
-    Plot comparison of a metric across different models.
+    Plot comparison of a specific metric across different models.
     
     Args:
-        metrics: Dictionary of model_name -> metrics dictionary.
-        metric_name: Name of the metric to plot.
-        title: Plot title.
-        save_path: Path to save the plot.
-        is_lower_better: Whether lower values are better for this metric.
+        metrics: Dictionary of metrics for each model
+        metric_name: Name of the metric to compare
+        title: Title of the plot
+        ylabel: Label for the y-axis
+        output_dir: Directory to save the plot
     """
     model_names = list(metrics.keys())
     metric_values = [metrics[model][metric_name] for model in model_names]
@@ -67,107 +66,112 @@ def plot_metric_comparison(
     plt.figure(figsize=(10, 6))
     bars = plt.bar(model_names, metric_values)
     
-    plt.title(title)
+    # Add value labels on top of bars
+    for bar, value in zip(bars, metric_values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+                 f'{value:.2f}', ha='center', va='bottom')
+    
     plt.xlabel('Model')
-    plt.ylabel(metric_name)
-    plt.grid(axis='y')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
     
-    # Add value labels above bars
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(
-            bar.get_x() + bar.get_width() / 2.,
-            height + 0.02 * max(metric_values),
-            f'{height:.4f}',
-            ha='center',
-            va='bottom',
-            rotation=0
-        )
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Highlight best model
-    if is_lower_better:
-        best_idx = np.argmin(metric_values)
-    else:
-        best_idx = np.argmax(metric_values)
-        
-    bars[best_idx].set_color('green')
-    
-    # Save plot
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path)
+    # Save the plot
+    output_path = output_dir / f"comparison_{metric_name}.png"
+    plt.savefig(output_path)
     plt.close()
     
-    print(f"Metric comparison plot saved to {save_path}")
+    logger.info(f"Comparison plot saved to {output_path}")
 
-
-def plot_all_metrics_comparison(
-    metrics: Dict[str, Dict[str, float]],
-    title: str,
-    save_path: str
-):
+def plot_all_metrics(metrics_path: str,
+                     output_dir: Path = PLOTS_DIR):
     """
-    Plot comparison of all metrics across different models using a normalized scale.
+    Generate all comparison plots from a metrics JSON file.
     
     Args:
-        metrics: Dictionary of model_name -> metrics dictionary.
-        title: Plot title.
-        save_path: Path to save the plot.
+        metrics_path: Path to the metrics JSON file
+        output_dir: Directory to save the plots
     """
-    if not metrics:
-        print("No metrics to plot")
-        return
+    # Load metrics
+    with open(metrics_path, 'r') as f:
+        metrics = json.load(f)
     
+    # Plot perplexity comparison
+    plot_comparison_metrics(
+        metrics=metrics,
+        metric_name='perplexity',
+        title='Model Comparison: Perplexity',
+        ylabel='Perplexity (lower is better)',
+        output_dir=output_dir
+    )
+    
+    # Plot BLEU score comparison
+    plot_comparison_metrics(
+        metrics=metrics,
+        metric_name='bleu_score',
+        title='Model Comparison: BLEU Score',
+        ylabel='BLEU Score (higher is better)',
+        output_dir=output_dir
+    )
+    
+    # Create normalized metrics chart (for comparing multiple metrics on one scale)
     model_names = list(metrics.keys())
-    metric_names = list(metrics[model_names[0]].keys())
+    metric_names = ['perplexity', 'bleu_score']
     
-    # Normalize metrics to 0-1 scale for comparison
+    # Normalize metrics (invert perplexity so lower is better becomes higher is better)
     normalized_metrics = {}
-    for metric in metric_names:
-        values = [metrics[model][metric] for model in model_names]
+    
+    for metric_name in metric_names:
+        values = [metrics[model][metric_name] for model in model_names]
+        if metric_name == 'perplexity':
+            # Invert perplexity: lower is better, so take 1/perplexity
+            # First add a small epsilon to prevent division by zero
+            values = [1 / (v + 1e-10) for v in values]
+        
+        # Min-max normalization to [0, 1]
         min_val = min(values)
         max_val = max(values)
-        range_val = max_val - min_val if max_val > min_val else 1.0
+        range_val = max_val - min_val if max_val != min_val else 1
+        normalized = [(v - min_val) / range_val for v in values]
         
-        # For perplexity, lower is better, so invert normalization
-        if metric == 'perplexity':
-            normalized_metrics[metric] = [(max_val - metrics[model][metric]) / range_val for model in model_names]
-        else:
-            normalized_metrics[metric] = [(metrics[model][metric] - min_val) / range_val for model in model_names]
+        for model, value in zip(model_names, normalized):
+            if model not in normalized_metrics:
+                normalized_metrics[model] = {}
+            normalized_metrics[model][metric_name] = value
     
-    # Plot
-    fig, ax = plt.subplots(figsize=(12, 8))
+    # Plot normalized metrics
+    plt.figure(figsize=(12, 8))
     
     x = np.arange(len(model_names))
-    width = 0.8 / len(metric_names)
+    width = 0.35
+    n_metrics = len(metric_names)
     
-    for i, metric in enumerate(metric_names):
-        offset = (i - len(metric_names) / 2 + 0.5) * width
-        bars = ax.bar(x + offset, normalized_metrics[metric], width, label=metric)
+    for i, metric_name in enumerate(metric_names):
+        offset = (i - n_metrics / 2 + 0.5) * width
+        values = [normalized_metrics[model][metric_name] for model in model_names]
+        bars = plt.bar(x + offset, values, width, label=metric_name)
         
         # Add value labels
-        for j, bar in enumerate(bars):
-            original_value = metrics[model_names[j]][metric]
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.02,
-                f'{original_value:.4f}',
-                ha='center',
-                va='bottom',
-                rotation=90,
-                fontsize=8
-            )
+        for bar, value in zip(bars, values):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05,
+                     f'{value:.2f}', ha='center', va='bottom', fontsize=8)
     
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels(model_names)
-    ax.set_ylabel('Normalized Score (higher is better)')
-    ax.set_ylim(0, 1.1)
-    ax.legend()
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.xlabel('Model')
+    plt.ylabel('Normalized Score (higher is better)')
+    plt.title('Model Comparison: Normalized Metrics')
+    plt.xticks(x, model_names)
+    plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
     
-    # Save plot
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path)
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the plot
+    output_path = output_dir / "comparison_normalized_metrics.png"
+    plt.savefig(output_path)
     plt.close()
     
-    print(f"All metrics comparison plot saved to {save_path}")
+    logger.info(f"Normalized metrics comparison plot saved to {output_path}")

@@ -1,164 +1,92 @@
 """
-RNN model implementation for text generation.
+RNN model implementation.
 """
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 
-import sys
-sys.path.append("../..")
-import config
-from src.models.base_model import BaseLanguageModel
+from src.models.base_model import BaseModel
+from src.data.tokenizer import Tokenizer
+from config import DEVICE, DROPOUT, NUM_LAYERS
 
-
-class RNNModel(BaseLanguageModel):
-    """Vanilla RNN-based language model."""
-    
-    def __init__(
-        self,
-        vocab_size: int,
-        embedding_dim: int = config.EMBEDDING_DIM,
-        hidden_dim: int = config.HIDDEN_DIM,
-        num_layers: int = config.NUM_LAYERS,
-        dropout: float = config.DROPOUT,
-        pad_idx: int = 0
-    ):
+class RNNModel(BaseModel):
+    """
+    Vanilla RNN-based language model.
+    """
+    def __init__(self, 
+                 vocab_size: int, 
+                 embedding_dim: int, 
+                 hidden_dim: int,
+                 num_layers: int = NUM_LAYERS,
+                 dropout: float = DROPOUT,
+                 tokenizer: Tokenizer = None):
         """
         Initialize the RNN model.
         
         Args:
-            vocab_size: Size of the vocabulary.
-            embedding_dim: Dimension of the token embeddings.
-            hidden_dim: Dimension of the hidden state.
-            num_layers: Number of RNN layers.
-            dropout: Dropout probability.
-            pad_idx: Index of the padding token.
+            vocab_size: Size of the vocabulary
+            embedding_dim: Dimension of the embedding layer
+            hidden_dim: Dimension of the hidden layers
+            num_layers: Number of RNN layers
+            dropout: Dropout probability
+            tokenizer: Tokenizer instance for encoding/decoding text
         """
-        super().__init__(vocab_size, embedding_dim, hidden_dim, pad_idx, dropout)
+        super().__init__(vocab_size, embedding_dim, hidden_dim, tokenizer)
         
         self.num_layers = num_layers
+        self.dropout_rate = dropout
         
         # RNN layers
         self.rnn = nn.RNN(
             input_size=embedding_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
+            batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            batch_first=True
+            bidirectional=False
         )
         
-        # Initialize weights with a small value to avoid exploding gradients
-        self._init_weights()
+        self.dropout = nn.Dropout(dropout)
+        
+        # Move model to device
+        self.to(DEVICE)
     
-    def _init_weights(self):
-        """Initialize the model weights."""
-        for name, param in self.rnn.named_parameters():
-            if 'weight' in name:
-                nn.init.uniform_(param, -0.1, 0.1)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
-    
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        hidden: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, 
+                input_ids: torch.Tensor, 
+                attention_mask: Optional[torch.Tensor] = None,
+                temperature: float = 1.0,
+                hidden_state: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass through the RNN model.
+        Forward pass of the RNN model.
         
         Args:
-            input_ids: Tensor of token ids [batch_size, seq_len].
-            attention_mask: Tensor indicating which tokens to attend to [batch_size, seq_len].
-            hidden: Initial hidden state [num_layers, batch_size, hidden_dim].
+            input_ids: Token IDs of shape (batch_size, seq_len)
+            attention_mask: Attention mask of shape (batch_size, seq_len)
+            temperature: Temperature for sampling (not used in forward pass)
+            hidden_state: Optional hidden state from previous call
             
         Returns:
-            output: Tensor of token logits [batch_size, seq_len, vocab_size].
-            hidden: Updated hidden state [num_layers, batch_size, hidden_dim].
+            Tuple of (logits, hidden_state)
         """
-        # Get batch size and sequence length
-        batch_size, seq_len = input_ids.shape
+        # Get embeddings
+        embeddings = self.embedding(input_ids)  # (batch_size, seq_len, embedding_dim)
         
-        # Initialize hidden state if not provided
-        if hidden is None:
-            device = input_ids.device
-            hidden = torch.zeros(
-                self.num_layers,
-                batch_size,
-                self.hidden_dim,
-                device=device
-            )
-        
-        # Embed the input tokens
-        embedded = self.embedding(input_ids)
-        embedded = self.dropout(embedded)
-        
-        # Pass through RNN
-        output, hidden = self.rnn(embedded, hidden)
-        
-        # Apply attention mask if provided
-        if attention_mask is not None:
-            output = output * attention_mask.unsqueeze(-1)
+        # Apply RNN
+        rnn_output, hidden = self.rnn(embeddings, hidden_state)  # (batch_size, seq_len, hidden_dim)
         
         # Apply dropout
-        output = self.dropout(output)
+        rnn_output = self.dropout(rnn_output)
         
-        # Project to vocabulary size
-        output = self.output_layer(output)
+        # Project to vocabulary
+        logits = self.output_layer(rnn_output)  # (batch_size, seq_len, vocab_size)
         
-        return output, hidden
+        return logits, hidden
     
-    def save(self, path: str = config.RNN_MODEL_PATH):
+    def get_model_size(self) -> int:
         """
-        Save the model to the specified path.
+        Get the number of parameters in the model.
         
-        Args:
-            path: Path to save the model.
-        """
-        # Save additional parameters specific to RNN
-        checkpoint = {
-            'model_state_dict': self.state_dict(),
-            'vocab_size': self.vocab_size,
-            'embedding_dim': self.embedding_dim,
-            'hidden_dim': self.hidden_dim,
-            'num_layers': self.num_layers,
-            'pad_idx': self.pad_idx,
-        }
-        
-        torch.save(checkpoint, path)
-    
-    @classmethod
-    def load(cls, path: str = config.RNN_MODEL_PATH, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
-        """
-        Load the model from the specified path.
-        
-        Args:
-            path: Path to load the model from.
-            device: Device to load the model to.
-            
         Returns:
-            The loaded model.
+            Number of parameters
         """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Model file not found at {path}")
-            
-        checkpoint = torch.load(path, map_location=device)
-        
-        # Create a new model instance
-        model = cls(
-            vocab_size=checkpoint['vocab_size'],
-            embedding_dim=checkpoint['embedding_dim'],
-            hidden_dim=checkpoint['hidden_dim'],
-            num_layers=checkpoint['num_layers'],
-            pad_idx=checkpoint['pad_idx']
-        )
-        
-        # Load the saved state
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Move to device
-        model.to(device)
-        
-        return model
+        return sum(p.numel() for p in self.parameters())

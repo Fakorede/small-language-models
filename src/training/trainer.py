@@ -1,286 +1,277 @@
 """
 Training loop implementation for language models.
 """
-
-import os
-import time
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from tqdm import tqdm
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import numpy as np
+import logging
+import os
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Union
+from tqdm import tqdm
+import time
 
-import sys
-sys.path.append("../..")
-import config
-from src.visualization.loss_plots import plot_learning_curves
+from src.models.base_model import BaseModel
+from config import (
+    DEVICE, LEARNING_RATE, WEIGHT_DECAY, NUM_EPOCHS,
+    GRADIENT_CLIP_VAL, EARLY_STOPPING_PATIENCE, MODELS_DIR
+)
 
+logger = logging.getLogger(__name__)
 
 class Trainer:
-    """Trainer class for language models."""
-    
-    def __init__(
-        self,
-        model: nn.Module,
-        train_dataloader: torch.utils.data.DataLoader,
-        val_dataloader: torch.utils.data.DataLoader,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        learning_rate: float = config.LEARNING_RATE,
-        weight_decay: float = config.WEIGHT_DECAY,
-        clip_grad_norm: float = config.CLIP_GRAD_NORM,
-        patience: int = config.PATIENCE,
-        lr_patience: int = config.LR_PATIENCE,
-        lr_factor: float = config.LR_FACTOR,
-        model_type: str = 'model'
-    ):
+    """
+    Trainer class for training and evaluating language models.
+    """
+    def __init__(self, 
+                 model: BaseModel,
+                 train_dataloader: DataLoader,
+                 val_dataloader: DataLoader,
+                 learning_rate: float = LEARNING_RATE,
+                 weight_decay: float = WEIGHT_DECAY,
+                 num_epochs: int = NUM_EPOCHS,
+                 gradient_clip_val: float = GRADIENT_CLIP_VAL,
+                 patience: int = EARLY_STOPPING_PATIENCE,
+                 model_dir: Path = MODELS_DIR,
+                 model_name: str = None):
         """
         Initialize the trainer.
         
         Args:
-            model: Model to train.
-            train_dataloader: DataLoader for training.
-            val_dataloader: DataLoader for validation.
-            device: Device to train on.
-            learning_rate: Learning rate.
-            weight_decay: Weight decay for regularization.
-            clip_grad_norm: Maximum norm for gradient clipping.
-            patience: Patience for early stopping.
-            lr_patience: Patience for learning rate scheduler.
-            lr_factor: Factor for learning rate scheduler.
-            model_type: Type of model (used for saving).
+            model: The model to train
+            train_dataloader: DataLoader for training data
+            val_dataloader: DataLoader for validation data
+            learning_rate: Learning rate for optimizer
+            weight_decay: Weight decay for optimizer
+            num_epochs: Number of training epochs
+            gradient_clip_val: Gradient clipping value
+            patience: Patience for early stopping
+            model_dir: Directory to save model checkpoints
+            model_name: Name of the model for saving checkpoints
         """
         self.model = model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
-        self.device = device
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        self.clip_grad_norm = clip_grad_norm
+        self.num_epochs = num_epochs
+        self.gradient_clip_val = gradient_clip_val
         self.patience = patience
-        self.lr_patience = lr_patience
-        self.lr_factor = lr_factor
-        self.model_type = model_type
+        self.model_dir = Path(model_dir)
+        self.model_name = model_name or model.__class__.__name__.lower()
         
-        # Move model to device
-        self.model.to(device)
+        # Make sure model directory exists
+        os.makedirs(self.model_dir, exist_ok=True)
         
-        # Initialize optimizer
-        self.optimizer = AdamW(
-            self.model.parameters(),
+        # Set up optimizer and loss function
+        self.optimizer = optim.AdamW(
+            model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay
         )
         
-        # Initialize learning rate scheduler
-        self.scheduler = ReduceLROnPlateau(
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=lr_factor,
-            patience=lr_patience,
+            factor=0.5,
+            patience=patience // 2,
             verbose=True
         )
         
-        # Initialize loss function
-        self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding token (0)
         
-        # Initialize history
+        # Track metrics
         self.train_losses = []
         self.val_losses = []
         self.best_val_loss = float('inf')
-        self.best_model = None
-        self.patience_counter = 0
+        self.best_epoch = 0
+        self.epochs_without_improvement = 0
         
-    def save_model(self, path: Optional[str] = None):
-        """
-        Save the model.
+        # Move model to device
+        self.model.to(DEVICE)
         
-        Args:
-            path: Path to save the model. If None, uses default path.
-        """
-        if path is None:
-            if self.model_type == 'rnn':
-                path = config.RNN_MODEL_PATH
-            elif self.model_type == 'lstm':
-                path = config.LSTM_MODEL_PATH
-            elif self.model_type == 'transformer':
-                path = config.TRANSFORMER_MODEL_PATH
-            else:
-                path = os.path.join(config.MODELS_DIR, f"{self.model_type}_model.pt")
-                
-        self.model.save(path)
-        print(f"Model saved to {path}")
+        logger.info(f"Initialized trainer for {self.model_name}")
+        logger.info(f"Model has {model.get_model_size()} parameters")
     
-    def train_epoch(self) -> float:
+    def train(self) -> Dict[str, List[float]]:
+        """
+        Train the model for the specified number of epochs.
+        
+        Returns:
+            Dictionary of metrics (train_loss, val_loss)
+        """
+        logger.info(f"Starting training for {self.model_name}")
+        
+        for epoch in range(self.num_epochs):
+            start_time = time.time()
+            
+            # Training
+            train_loss = self._train_epoch()
+            self.train_losses.append(train_loss)
+            
+            # Validation
+            val_loss = self._validate_epoch()
+            self.val_losses.append(val_loss)
+            
+            # Calculate perplexity
+            train_ppl = np.exp(train_loss)
+            val_ppl = np.exp(val_loss)
+            
+            # Logging
+            epoch_time = time.time() - start_time
+            logger.info(f"Epoch {epoch+1}/{self.num_epochs} | "
+                        f"Time: {epoch_time:.2f}s | "
+                        f"Train Loss: {train_loss:.4f} | "
+                        f"Train PPL: {train_ppl:.2f} | "
+                        f"Val Loss: {val_loss:.4f} | "
+                        f"Val PPL: {val_ppl:.2f}")
+            
+            # Learning rate scheduler
+            self.scheduler.step(val_loss)
+            
+            # Save best model
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.best_epoch = epoch
+                self.epochs_without_improvement = 0
+                
+                # Save model checkpoint
+                self._save_checkpoint(val_loss=val_loss, epoch=epoch)
+                logger.info(f"New best model saved with validation loss: {val_loss:.4f}")
+            else:
+                self.epochs_without_improvement += 1
+                logger.info(f"No improvement for {self.epochs_without_improvement} epochs")
+            
+            # Early stopping
+            if self.epochs_without_improvement >= self.patience:
+                logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                break
+        
+        logger.info(f"Training completed. Best model from epoch {self.best_epoch+1} "
+                    f"with validation loss: {self.best_val_loss:.4f}")
+        
+        return {
+            'train_loss': self.train_losses,
+            'val_loss': self.val_losses
+        }
+    
+    def _train_epoch(self) -> float:
         """
         Train the model for one epoch.
         
         Returns:
-            Average training loss.
+            Average training loss for the epoch
         """
         self.model.train()
-        total_loss = 0.0
-        total_samples = 0
+        total_loss = 0
+        total_tokens = 0
         
-        progress_bar = tqdm(self.train_dataloader, desc="Training")
+        # Progress bar
+        progress_bar = tqdm(self.train_dataloader, desc="Training", leave=False)
         
         for batch in progress_bar:
-            # Move batch to device
-            input_ids = batch["input_ids"].to(self.device)
-            attention_mask = batch["attention_mask"].to(self.device) if "attention_mask" in batch else None
-            labels = batch["labels"].to(self.device)
-            
-            # Zero gradients
-            self.optimizer.zero_grad()
+            # Get batch data
+            input_ids = batch['input_ids'].to(DEVICE)
+            target_ids = batch['target_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
             
             # Forward pass
-            outputs, _ = self.model(input_ids, attention_mask)
+            self.optimizer.zero_grad()
+            logits, _ = self.model(input_ids, attention_mask)
             
-            # Reshape outputs for loss computation
-            # outputs: [batch_size, seq_len, vocab_size]
-            # labels: [batch_size, seq_len]
-            batch_size, seq_len = labels.shape
-            outputs = outputs.view(batch_size * seq_len, -1)
-            labels = labels.view(-1)
+            # Reshape for cross-entropy
+            # From (batch_size, seq_len, vocab_size) to (batch_size * seq_len, vocab_size)
+            logits = logits.reshape(-1, logits.size(-1))
+            targets = target_ids.reshape(-1)
             
-            # Compute loss
-            loss = self.criterion(outputs, labels)
+            # Calculate loss
+            loss = self.criterion(logits, targets)
             
             # Backward pass
             loss.backward()
             
-            # Clip gradients
-            if self.clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.clip_grad_norm
-                )
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_val)
             
-            # Update parameters
+            # Update weights
             self.optimizer.step()
             
-            # Update total loss
-            total_loss += loss.item() * batch_size
-            total_samples += batch_size
+            # Track loss
+            total_loss += loss.item() * targets.size(0)
+            total_tokens += (targets != 0).sum().item()  # Exclude padding tokens
             
             # Update progress bar
-            progress_bar.set_postfix({"loss": loss.item()})
+            progress_bar.set_postfix({'loss': loss.item()})
         
-        # Compute average loss
-        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        # Calculate average loss
+        avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
         
         return avg_loss
     
-    def validate(self) -> float:
+    def _validate_epoch(self) -> float:
         """
-        Validate the model.
+        Validate the model for one epoch.
         
         Returns:
-            Average validation loss.
+            Average validation loss for the epoch
         """
         self.model.eval()
-        total_loss = 0.0
-        total_samples = 0
+        total_loss = 0
+        total_tokens = 0
         
         with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Validation"):
-                # Move batch to device
-                input_ids = batch["input_ids"].to(self.device)
-                attention_mask = batch["attention_mask"].to(self.device) if "attention_mask" in batch else None
-                labels = batch["labels"].to(self.device)
+            # Progress bar
+            progress_bar = tqdm(self.val_dataloader, desc="Validation", leave=False)
+            
+            for batch in progress_bar:
+                # Get batch data
+                input_ids = batch['input_ids'].to(DEVICE)
+                target_ids = batch['target_ids'].to(DEVICE)
+                attention_mask = batch['attention_mask'].to(DEVICE)
                 
                 # Forward pass
-                outputs, _ = self.model(input_ids, attention_mask)
+                logits, _ = self.model(input_ids, attention_mask)
                 
-                # Reshape outputs for loss computation
-                batch_size, seq_len = labels.shape
-                outputs = outputs.view(batch_size * seq_len, -1)
-                labels = labels.view(-1)
+                # Reshape for cross-entropy
+                logits = logits.reshape(-1, logits.size(-1))
+                targets = target_ids.reshape(-1)
                 
-                # Compute loss
-                loss = self.criterion(outputs, labels)
+                # Calculate loss
+                loss = self.criterion(logits, targets)
                 
-                # Update total loss
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
+                # Track loss
+                total_loss += loss.item() * targets.size(0)
+                total_tokens += (targets != 0).sum().item()  # Exclude padding tokens
+                
+                # Update progress bar
+                progress_bar.set_postfix({'loss': loss.item()})
         
-        # Compute average loss
-        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        # Calculate average loss
+        avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
         
         return avg_loss
     
-    def train(self, num_epochs: int = config.NUM_EPOCHS) -> Dict[str, List[float]]:
+    def _save_checkpoint(self, val_loss: float, epoch: int):
         """
-        Train the model for multiple epochs.
+        Save model checkpoint.
         
         Args:
-            num_epochs: Number of epochs to train for.
-            
-        Returns:
-            Dictionary with training and validation losses.
+            val_loss: Validation loss
+            epoch: Current epoch
         """
-        print(f"Starting training for {self.model_type} model on {self.device}...")
-        print(f"Training for {num_epochs} epochs")
+        checkpoint_path = self.model_dir / f"{self.model_name}_best.pt"
+        self.model.save(checkpoint_path)
         
-        start_time = time.time()
-        
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch+1}/{num_epochs}")
-            
-            # Train for one epoch
-            train_loss = self.train_epoch()
-            self.train_losses.append(train_loss)
-            
-            # Validate
-            val_loss = self.validate()
-            self.val_losses.append(val_loss)
-            
-            # Update learning rate scheduler
-            self.scheduler.step(val_loss)
-            
-            # Print losses
-            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-            
-            # Check if this is the best model so far
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.best_model = self.model.state_dict().copy()
-                self.patience_counter = 0
-                
-                # Save best model
-                self.save_model()
-            else:
-                self.patience_counter += 1
-                print(f"Patience counter: {self.patience_counter}/{self.patience}")
-                
-                # Check for early stopping
-                if self.patience_counter >= self.patience:
-                    print(f"Early stopping after {epoch+1} epochs")
-                    break
-        
-        # If we didn't save any model (unlikely), save the last one
-        if self.best_model is None:
-            self.save_model()
-        else:
-            # Load the best model
-            self.model.load_state_dict(self.best_model)
-        
-        # Calculate training time
-        total_time = time.time() - start_time
-        print(f"Training completed in {total_time:.2f}s")
-        
-        # Plot learning curves
-        plot_path = os.path.join(config.PLOTS_DIR, f"{self.model_type}_loss.png")
-        plot_learning_curves(
-            self.train_losses,
-            self.val_losses,
-            f"{self.model_type.upper()} Model Training Curve",
-            plot_path
-        )
-        
-        return {
-            "train_losses": self.train_losses,
-            "val_losses": self.val_losses
-        }
+        # Save metadata about the checkpoint
+        metadata_path = self.model_dir / f"{self.model_name}_best_metadata.pt"
+        torch.save({
+            'epoch': epoch,
+            'val_loss': val_loss,
+            'val_ppl': np.exp(val_loss),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses
+        }, metadata_path)

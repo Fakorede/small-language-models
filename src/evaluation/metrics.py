@@ -1,206 +1,279 @@
 """
-Evaluation metrics for the text generation models.
+Evaluation metrics for language models.
 """
-
-import math
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, List, Tuple, Union, Optional, Any
+import numpy as np
+from collections import Counter
+from typing import Dict, List, Union
+import logging
 import nltk
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+import math
+from torch.utils.data import DataLoader
+import json
 
-# Download NLTK resources
+from src.models.base_model import BaseModel
+from config import DEVICE
+
+logger = logging.getLogger(__name__)
+
+# Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
-    nltk.download('punkt', quiet=True)
+    print("Downloading NLTK punkt tokenizer...")
+    nltk.download('punkt', quiet=False)
 
+# Make sure it's actually downloaded
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    raise RuntimeError("Failed to download NLTK punkt tokenizer. Please run 'python -m nltk.downloader punkt' manually.")
 
-def compute_perplexity(model: nn.Module, 
-                       dataloader: torch.utils.data.DataLoader, 
-                       device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> float:
+def simple_tokenize(text):
     """
-    Compute perplexity on a dataset.
+    A simple tokenizer that splits on whitespace and punctuation.
+    Fallback in case NLTK isn't available.
     
     Args:
-        model: Model to evaluate.
-        dataloader: DataLoader for evaluation.
-        device: Device to run the evaluation on.
+        text: The text to tokenize
         
     Returns:
-        Perplexity score (lower is better).
+        List of tokens
+    """
+    # Replace punctuation with spaces and split
+    for char in ',.!?;:()[]{}"\'-':
+        text = text.replace(char, f' {char} ')
+    return [token for token in text.split() if token]
+
+def modified_bleu_score(reference, candidate, max_n=4, weights=None):
+    """
+    Calculate a simplified BLEU score based on n-gram precision.
+    
+    Args:
+        reference: List of tokens from the reference text
+        candidate: List of tokens from the candidate (generated) text
+        max_n: Maximum n-gram size to consider
+        weights: Weights for each n-gram precision (default: equal weights)
+        
+    Returns:
+        Modified BLEU score
+    """
+    if not candidate:
+        return 0.0
+    
+    # Default to equal weights if not provided
+    if weights is None:
+        weights = [1.0/max_n] * max_n
+    
+    # Calculate brevity penalty
+    bp = min(1.0, np.exp(1 - len(reference)/max(len(candidate), 1)))
+    
+    precisions = []
+    for n in range(1, max_n + 1):
+        # Create n-grams
+        ref_ngrams = Counter()
+        cand_ngrams = Counter()
+        
+        # Handle the case where n is greater than the length of the sequence
+        if len(reference) >= n and len(candidate) >= n:
+            # Create n-grams for reference
+            for i in range(len(reference) - n + 1):
+                ngram = tuple(reference[i:i+n])
+                ref_ngrams[ngram] += 1
+            
+            # Create n-grams for candidate
+            for i in range(len(candidate) - n + 1):
+                ngram = tuple(candidate[i:i+n])
+                cand_ngrams[ngram] += 1
+            
+            # Count matches (clipped by reference count)
+            matches = sum(min(cand_ngrams[ngram], ref_ngrams[ngram]) for ngram in cand_ngrams)
+            total = max(len(candidate) - n + 1, 1)  # Total number of n-grams in candidate
+            
+            # Calculate precision for this n-gram size
+            precisions.append(matches / total if total > 0 else 0.0001)  # Small value to avoid log(0)
+        else:
+            precisions.append(0.0001)  # Small value for n-grams larger than sequence
+    
+    # Calculate weighted geometric mean of precisions
+    log_precisions = [weight * np.log(precision) for weight, precision in zip(weights, precisions)]
+    weighted_precision = np.exp(sum(log_precisions))
+    
+    # Final BLEU score
+    bleu = bp * weighted_precision
+    
+    return bleu
+
+def calculate_perplexity(model: BaseModel, 
+                         dataloader: DataLoader) -> float:
+    """
+    Calculate perplexity on a dataset.
+    
+    Args:
+        model: The model to evaluate
+        dataloader: DataLoader for evaluation data
+        
+    Returns:
+        Perplexity score
     """
     model.eval()
-    total_loss = 0.0
+    criterion = nn.CrossEntropyLoss(ignore_index=0, reduction='sum')
+    total_loss = 0
     total_tokens = 0
-    
-    criterion = nn.CrossEntropyLoss(ignore_index=-100, reduction='sum')
     
     with torch.no_grad():
         for batch in dataloader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            # Get batch data
+            input_ids = batch['input_ids'].to(DEVICE)
+            target_ids = batch['target_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
             
             # Forward pass
-            outputs, _ = model(input_ids, attention_mask)
+            logits, _ = model(input_ids, attention_mask)
             
-            # Reshape for cross entropy
-            outputs = outputs.view(-1, outputs.shape[-1])
-            labels = labels.view(-1)
+            # Reshape for cross-entropy
+            logits = logits.reshape(-1, logits.size(-1))
+            targets = target_ids.reshape(-1)
             
-            # Compute loss
-            loss = criterion(outputs, labels)
+            # Calculate loss
+            loss = criterion(logits, targets)
             
-            # Count tokens
-            non_pad_mask = (labels != -100)
-            num_tokens = non_pad_mask.sum().item()
-            
+            # Track loss
             total_loss += loss.item()
-            total_tokens += num_tokens
+            total_tokens += (targets != 0).sum().item()  # Exclude padding tokens
     
-    # Compute average loss
+    # Calculate perplexity
     avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
-    
-    # Compute perplexity
     perplexity = math.exp(avg_loss)
     
     return perplexity
 
-
-def compute_bleu(model: nn.Module, 
-                dataloader: torch.utils.data.DataLoader,
-                tokenizer,
-                device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-                max_samples: int = 100) -> float:
+def calculate_bleu_score(model: BaseModel, 
+                         dataloader: DataLoader,
+                         max_samples: int = 100) -> float:
     """
-    Compute BLEU score on a dataset.
+    Calculate BLEU score on a dataset using the modified BLEU implementation.
     
     Args:
-        model: Model to evaluate.
-        dataloader: DataLoader for evaluation.
-        tokenizer: Tokenizer for decoding/encoding.
-        device: Device to run the evaluation on.
-        max_samples: Maximum number of samples to evaluate.
+        model: The model to evaluate
+        dataloader: DataLoader for evaluation data
+        max_samples: Maximum number of samples to evaluate
         
     Returns:
-        BLEU score (higher is better).
+        BLEU score
     """
     model.eval()
-    references = []
-    hypotheses = []
+    bleu_scores = []
+    samples_processed = 0
     
-    # Set the tokenizer for the model
-    model.set_tokenizer(tokenizer)
+    # Choose tokenization function - try NLTK first, fall back to simple tokenizer
+    tokenize_func = None
+    try:
+        # Test if NLTK tokenizer works
+        nltk.word_tokenize("test sentence")
+        tokenize_func = nltk.word_tokenize
+        logger.info("Using NLTK word tokenizer for BLEU score calculation")
+    except (LookupError, ImportError):
+        tokenize_func = simple_tokenize
+        logger.warning("NLTK tokenizer not available, using fallback simple tokenizer")
     
-    with torch.no_grad():
-        sample_count = 0
-        for batch in dataloader:
-            if sample_count >= max_samples:
+    for batch in dataloader:
+        if samples_processed >= max_samples:
+            break
+        
+        prompts = batch['prompt']
+        completions = batch['completion']
+        
+        for prompt, reference in zip(prompts, completions):
+            if samples_processed >= max_samples:
                 break
-                
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"]
             
-            # Loop through batch
-            for i in range(min(len(input_ids), max_samples - sample_count)):
-                # Extract prompt (until first non -100 label)
-                prompt_ids = []
-                for j, label in enumerate(labels[i]):
-                    if label.item() == -100:
-                        prompt_ids.append(input_ids[i][j].item())
-                    else:
-                        break
-                        
-                # Skip if no prompt found
-                if not prompt_ids:
-                    continue
-                    
-                # Get actual prompt text
-                prompt_text = tokenizer.decode(prompt_ids)
-                
-                # Generate text from the model
-                generated_text = model.prompt(prompt_text, device=device)
-                
-                # Extract reference text (only from the non -100 labels)
-                reference_ids = [label.item() for label in labels[i] if label.item() != -100]
-                reference_text = tokenizer.decode(reference_ids)
-                
-                # Tokenize for BLEU
-                reference_tokens = nltk.word_tokenize(reference_text)
-                hypothesis_tokens = nltk.word_tokenize(generated_text)
-                
-                # Add to lists
-                references.append([reference_tokens])
-                hypotheses.append(hypothesis_tokens)
-                
-                sample_count += 1
+            # Generate text
+            generated = model.generate(prompt, max_length=50, temperature=0.0)  # Use greedy decoding
+            
+            # Tokenize reference and candidate
+            reference_tokens = tokenize_func(reference)
+            candidate_tokens = tokenize_func(generated)
+            
+            # Calculate modified BLEU score
+            score = modified_bleu_score(
+                reference=reference_tokens,
+                candidate=candidate_tokens,
+                max_n=1,  # Consider up to 4-grams
+                weights=[0.25, 0.25, 0.25, 0.25]  # Equal weights for 1-gram to 4-gram
+            )
+            
+            bleu_scores.append(score)
+            samples_processed += 1
     
-    # Compute BLEU score
-    smoothie = SmoothingFunction().method1
-    bleu_score = corpus_bleu(references, hypotheses, smoothing_function=smoothie)
+    # Calculate average BLEU score
+    avg_bleu = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0
     
-    return bleu_score
+    return avg_bleu
 
-
-def evaluate_model(model: nn.Module,
-                  test_dataloader: torch.utils.data.DataLoader,
-                  tokenizer,
-                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> Dict[str, float]:
+def evaluate_model(model: BaseModel, 
+                   test_dataloader: DataLoader,
+                   prompt_examples: List[str] = None) -> Dict[str, Union[float, List[str]]]:
     """
-    Evaluate a model using multiple metrics.
+    Comprehensive evaluation of a model.
     
     Args:
-        model: Model to evaluate.
-        test_dataloader: DataLoader for testing.
-        tokenizer: Tokenizer for decoding/encoding.
-        device: Device to run the evaluation on.
+        model: The model to evaluate
+        test_dataloader: DataLoader for test data
+        prompt_examples: Optional list of prompts to generate text for
         
     Returns:
-        Dictionary of metrics.
+        Dictionary of evaluation metrics and generated examples
     """
-    # Compute perplexity
-    perplexity = compute_perplexity(model, test_dataloader, device)
+    logger.info(f"Evaluating model: {model.__class__.__name__}")
     
-    # Compute BLEU score
-    bleu_score = compute_bleu(model, test_dataloader, tokenizer, device)
+    # Calculate perplexity
+    perplexity = calculate_perplexity(model, test_dataloader)
+    logger.info(f"Perplexity: {perplexity:.2f}")
     
-    # Return metrics
+    # Calculate BLEU score using our modified implementation
+    bleu = calculate_bleu_score(model, test_dataloader)
+    logger.info(f"Modified BLEU score: {bleu:.4f}")
+    
+    # Generate examples
+    generated_examples = []
+    if prompt_examples:
+        for prompt in prompt_examples:
+            generated_text = model.generate(prompt, temperature=0.8)
+            generated_examples.append({
+                'prompt': prompt,
+                'generated': generated_text
+            })
+            logger.info(f"Prompt: {prompt}")
+            logger.info(f"Generated: {generated_text}")
+    
+    # Return all metrics
     return {
-        "perplexity": perplexity,
-        "bleu_score": bleu_score
+        'perplexity': perplexity,
+        'bleu_score': bleu,
+        'generated_examples': generated_examples
     }
 
-
-def generate_responses(model: nn.Module,
-                       prompts: List[str],
-                       tokenizer,
-                       max_length: int = 100,
-                       temperature: float = 1.0,
-                       device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> List[str]:
+def save_metrics(metrics_dict: Dict[str, Dict], 
+                 output_path: str):
     """
-    Generate responses for a list of prompts.
+    Save evaluation metrics to a JSON file.
     
     Args:
-        model: Model to generate responses with.
-        prompts: List of prompt texts.
-        tokenizer: Tokenizer for decoding/encoding.
-        max_length: Maximum length of generated sequences.
-        temperature: Temperature for sampling.
-        device: Device to run the model on.
-        
-    Returns:
-        List of generated responses.
+        metrics_dict: Dictionary of metrics for each model
+        output_path: Path to save the metrics
     """
-    model.eval()
-    model.set_tokenizer(tokenizer)
+    # Ensure all values are JSON serializable
+    for model_name, metrics in metrics_dict.items():
+        for key, value in metrics.items():
+            if isinstance(value, np.ndarray):
+                metrics_dict[model_name][key] = value.tolist()
+            elif isinstance(value, torch.Tensor):
+                metrics_dict[model_name][key] = value.cpu().tolist()
     
-    responses = []
+    # Save to file
+    with open(output_path, 'w') as f:
+        json.dump(metrics_dict, f, indent=2)
     
-    for prompt in prompts:
-        response = model.prompt(prompt, max_length=max_length, temperature=temperature, device=device)
-        responses.append(response)
-    
-    return responses
+    logger.info(f"Metrics saved to {output_path}")

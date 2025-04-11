@@ -1,208 +1,191 @@
 """
-Tokenizer implementation using SentencePiece BPE.
+Tokenizer implementation using SentencePiece BPE tokenization
 """
-
 import os
-import glob
-import sentencepiece as spm
-from typing import List, Union, Dict, Any
-import torch
-
-import sys
-sys.path.append("../..")
+import json
 import config
+import sentencepiece as spm
+from pathlib import Path
+import logging
+from typing import List, Union, Optional
 
+from config import TOKENIZER_MODEL_PREFIX, VOCAB_SIZE, RAW_DATA_DIR
 
-class SPTokenizer:
+logger = logging.getLogger(__name__)
+
+class Tokenizer:
     """
-    SentencePiece BPE tokenizer implementation for the text generation task.
+    A wrapper around the SentencePiece tokenizer for BPE-based subword tokenization.
     """
-    def __init__(self, vocab_size: int = config.VOCAB_SIZE):
+    def __init__(self, model_path: Union[str, Path] = TOKENIZER_MODEL_PREFIX):
         """
-        Initialize the tokenizer.
+        Initialize the tokenizer from a trained model or train a new one if model doesn't exist.
         
         Args:
-            vocab_size: Size of the vocabulary.
+            model_path: Path to the trained SentencePiece model
         """
-        self.vocab_size = vocab_size
-        self.model_prefix = os.path.join(config.TOKENIZER_DIR, f"spm_bpe_{vocab_size}")
-        self.tokenizer = None
+        self.model_path = Path(model_path)
+        self.sp_model = None
         
-        # Special tokens
-        self.pad_token = "<pad>"
-        self.bos_token = "<bos>"
-        self.eos_token = "<eos>"
-        self.unk_token = "<unk>"
-        
-    def train(self, raw_data_dir: str = config.RAW_DATA_DIR, 
-              character_coverage: float = 0.9995,
-              model_type: str = "bpe"):
+        if self.model_path.exists():
+            self.load()
+        else:
+            logger.info(f"Tokenizer model not found at {model_path}. You need to train it first.")
+    
+    def train(self, vocab_size: int = VOCAB_SIZE, input_files: Optional[List[Path]] = None):
         """
-        Train the tokenizer on the raw data.
+        Train a new SentencePiece tokenizer model.
         
         Args:
-            raw_data_dir: Directory containing raw text files.
-            character_coverage: Character coverage in SentencePiece.
-            model_type: Type of model ('bpe' or 'unigram').
+            vocab_size: Size of the vocabulary
+            input_files: List of text files to use for training the tokenizer
         """
-        # Prepare a temporary merged corpus file
-        temp_corpus_file = os.path.join(config.TOKENIZER_DIR, "corpus.txt")
+        # if input_files is None:
+        #     # Use all text files in the raw data directory
+        #     input_files = list(RAW_DATA_DIR.glob("*.txt"))
         
-        # Get all text files in the raw data directory
-        text_files = glob.glob(os.path.join(raw_data_dir, "*.txt"))
+        text_data = self.read_text_files(RAW_DATA_DIR)
+        temp_file = f"{self.model_path}.txt"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            for text in text_data:
+                f.write(text + '\n')
+
+        # Make sure parent directory exists
+        # os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
         
-        # Merge all text files into a single corpus
-        with open(temp_corpus_file, 'w', encoding='utf-8') as outfile:
-            for file_path in text_files:
-                with open(file_path, 'r', encoding='utf-8') as infile:
-                    outfile.write(infile.read())
-                    outfile.write("\n")
-                    
-        # Train the SentencePiece tokenizer
+        # Train the SentencePiece model
         spm.SentencePieceTrainer.train(
-            input=temp_corpus_file,
-            model_prefix=self.model_prefix,
-            vocab_size=self.vocab_size,
-            character_coverage=character_coverage,
-            model_type=model_type,
-            normalization_rule_name="nmt_nfkc_cf",
-            user_defined_symbols=[self.pad_token, self.bos_token, self.eos_token],
+            input=str(temp_file),
+            model_prefix=str(self.model_path),
+            vocab_size=vocab_size,
+            model_type="bpe",
+            character_coverage=1.0,
             pad_id=0,
-            bos_id=1,
-            eos_id=2,
-            unk_id=3
+            unk_id=1,
+            bos_id=2,
+            eos_id=3,
+            normalization_rule_name="nmt_nfkc_cf"
         )
         
-        # Load the trained tokenizer
+        # Remove temporary file
+        # temp_file.unlink()
+        
+        # Load the trained model
         self.load()
-        
-        # Clean up the temporary corpus file
-        if os.path.exists(temp_corpus_file):
-            os.remove(temp_corpus_file)
-            
-    def load(self, model_path: str = None):
-        """
-        Load the tokenizer from a SentencePiece model file.
-        
-        Args:
-            model_path: Path to the SentencePiece model file.
-                        If None, uses the default path.
-        """
-        if model_path is None:
-            model_path = f"{self.model_prefix}.model"
-            
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"SentencePiece model not found at {model_path}")
-            
-        self.tokenizer = spm.SentencePieceProcessor(model_file=model_path)
-        
-    def save(self, path: str = None):
-        """
-        Save the tokenizer configuration.
-        
-        Args:
-            path: Path to save the configuration.
-        """
-        # The SentencePiece model file is already saved during training
-        pass
-        
-    def encode(self, text: Union[str, List[str]], add_special_tokens: bool = False) -> Union[List[int], List[List[int]]]:
-        """
-        Encode text to token ids.
-        
-        Args:
-            text: Text to encode (string or list of strings).
-            add_special_tokens: Whether to add special tokens.
-            
-        Returns:
-            List of token ids.
-        """
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not loaded. Call load() or train() first.")
-            
-        if isinstance(text, str):
-            if add_special_tokens:
-                return [self.tokenizer.bos_id()] + self.tokenizer.encode(text) + [self.tokenizer.eos_id()]
-            else:
-                return self.tokenizer.encode(text)
-        else:
-            if add_special_tokens:
-                return [[self.tokenizer.bos_id()] + self.tokenizer.encode(t) + [self.tokenizer.eos_id()] for t in text]
-            else:
-                return [self.tokenizer.encode(t) for t in text]
-            
-    def decode(self, token_ids: Union[List[int], torch.Tensor]) -> str:
-        """
-        Decode token ids to text.
-        
-        Args:
-            token_ids: List of token ids.
-            
-        Returns:
-            Decoded text.
-        """
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not loaded. Call load() or train() first.")
-            
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.cpu().tolist()
-            
-        return self.tokenizer.decode(token_ids)
+        logger.info(f"Tokenizer trained and saved to {self.model_path}")
     
-    def decode_batch(self, token_ids_batch: Union[List[List[int]], torch.Tensor]) -> List[str]:
+    def load(self):
+        """Load the SentencePiece model."""
+        self.sp_model = spm.SentencePieceProcessor()
+        self.sp_model.load(f"{self.model_path}.model")
+        logger.info(f"Loaded tokenizer from {self.model_path}")
+    
+    def encode(self, text: str) -> List[int]:
         """
-        Decode a batch of token ids to text.
+        Encode text to token IDs.
         
         Args:
-            token_ids_batch: Batch of token ids.
+            text: Input text to tokenize
             
         Returns:
-            List of decoded texts.
+            List of token IDs
         """
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not loaded. Call load() or train() first.")
-            
-        if isinstance(token_ids_batch, torch.Tensor):
-            token_ids_batch = token_ids_batch.cpu().tolist()
-            
-        return [self.tokenizer.decode(ids) for ids in token_ids_batch]
+        if self.sp_model is None:
+            raise ValueError("Tokenizer model not loaded. Call load() or train() first.")
+        
+        return self.sp_model.encode(text)
     
-    @property
-    def vocab_size(self) -> int:
-        """Get the vocabulary size."""
-        if self.tokenizer is not None:
-            return self.tokenizer.get_piece_size()
-        return self._vocab_size
+    def decode(self, token_ids: List[int]) -> str:
+        """
+        Decode token IDs back to text.
         
-    @vocab_size.setter
-    def vocab_size(self, size: int):
-        """Set the vocabulary size."""
-        self._vocab_size = size
+        Args:
+            token_ids: List of token IDs
+            
+        Returns:
+            Decoded text
+        """
+        if self.sp_model is None:
+            raise ValueError("Tokenizer model not loaded. Call load() or train() first.")
         
+        return self.sp_model.decode(token_ids)
+    
+    def get_vocab_size(self) -> int:
+        """
+        Get the vocabulary size.
+        
+        Returns:
+            Size of the vocabulary
+        """
+        if self.sp_model is None:
+            raise ValueError("Tokenizer model not loaded. Call load() or train() first.")
+        
+        return self.sp_model.get_piece_size()
+    
+    def id_to_token(self, token_id: int) -> str:
+        """
+        Convert a token ID to its string representation.
+        
+        Args:
+            token_id: The token ID
+            
+        Returns:
+            The string representation of the token
+        """
+        if self.sp_model is None:
+            raise ValueError("Tokenizer model not loaded. Call load() or train() first.")
+        
+        return self.sp_model.id_to_piece(token_id)
+    
+    def token_to_id(self, token: str) -> int:
+        """
+        Convert a token string to its ID.
+        
+        Args:
+            token: The token string
+            
+        Returns:
+            The token ID
+        """
+        if self.sp_model is None:
+            raise ValueError("Tokenizer model not loaded. Call load() or train() first.")
+        
+        return self.sp_model.piece_to_id(token)
+    
+    def read_text_files(self, raw_dir: str) -> List[str]:
+        """
+        Read all text files from the raw directory.
+
+        Args:
+            raw_dir: Directory containing raw text files
+
+        Returns:
+            List of text contents
+        """
+        text_data = []
+        for filename in os.listdir(raw_dir):
+            if filename.endswith(".txt"):
+                file_path = os.path.join(raw_dir, filename)
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    text_data.append(file.read())
+        return text_data
+    
     @property
     def pad_id(self) -> int:
-        """Get the pad token id."""
-        if self.tokenizer is not None:
-            return self.tokenizer.pad_id()
+        """Get the ID of the padding token."""
         return 0
-        
-    @property
-    def bos_id(self) -> int:
-        """Get the beginning-of-sequence token id."""
-        if self.tokenizer is not None:
-            return self.tokenizer.bos_id()
-        return 1
-        
-    @property
-    def eos_id(self) -> int:
-        """Get the end-of-sequence token id."""
-        if self.tokenizer is not None:
-            return self.tokenizer.eos_id()
-        return 2
-        
+    
     @property
     def unk_id(self) -> int:
-        """Get the unknown token id."""
-        if self.tokenizer is not None:
-            return self.tokenizer.unk_id()
+        """Get the ID of the unknown token."""
+        return 1
+    
+    @property
+    def bos_id(self) -> int:
+        """Get the ID of the beginning-of-sequence token."""
+        return 2
+    
+    @property
+    def eos_id(self) -> int:
+        """Get the ID of the end-of-sequence token."""
         return 3

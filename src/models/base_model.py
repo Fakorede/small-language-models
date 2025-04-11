@@ -1,220 +1,211 @@
 """
-Base class for all text generation models.
+Base class for all language models.
 """
-
-import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import List, Tuple, Optional, Dict, Any
+import logging
 
-import sys
-sys.path.append("../..")
-import config
-from src.data.tokenizer import SPTokenizer
+from src.data.tokenizer import Tokenizer
+from config import DEVICE, MAX_GENERATION_LENGTH, TEMPERATURE
 
+logger = logging.getLogger(__name__)
 
-class BaseLanguageModel(nn.Module):
-    """Base class for all language models."""
-    
-    def __init__(
-        self,
-        vocab_size: int,
-        embedding_dim: int,
-        hidden_dim: int,
-        pad_idx: int = 0,
-        dropout: float = 0.2
-    ):
+class BaseModel(nn.Module):
+    """
+    Base class for all language models.
+    """
+    def __init__(self, 
+                 vocab_size: int, 
+                 embedding_dim: int, 
+                 hidden_dim: int,
+                 tokenizer: Tokenizer):
         """
-        Initialize the base language model.
+        Initialize the base model.
         
         Args:
-            vocab_size: Size of the vocabulary.
-            embedding_dim: Dimension of the token embeddings.
-            hidden_dim: Dimension of the hidden state.
-            pad_idx: Index of the padding token.
-            dropout: Dropout probability.
+            vocab_size: Size of the vocabulary
+            embedding_dim: Dimension of the embedding layer
+            hidden_dim: Dimension of the hidden layers
+            tokenizer: Tokenizer instance for encoding/decoding text
         """
         super().__init__()
-        
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
-        self.pad_idx = pad_idx
+        self.tokenizer = tokenizer
         
-        # Token embedding layer
-        self.embedding = nn.Embedding(
-            num_embeddings=vocab_size,
-            embedding_dim=embedding_dim,
-            padding_idx=pad_idx
-        )
-        
-        # Output layer to predict next token probabilities
+        # Common layers for all models
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.output_layer = nn.Linear(hidden_dim, vocab_size)
         
-        # Dropout for regularization
-        self.dropout = nn.Dropout(dropout)
-        
-        # Tokenizer reference (to be set later)
-        self.tokenizer = None
-    
-    def forward(self, input_ids, attention_mask=None, hidden=None):
+    def forward(self, 
+                input_ids: torch.Tensor, 
+                attention_mask: Optional[torch.Tensor] = None,
+                temperature: float = 1.0) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Forward pass (to be implemented by child classes).
+        Forward pass of the model.
         
         Args:
-            input_ids: Tensor of token ids of shape [batch_size, seq_len].
-            attention_mask: Tensor indicating which tokens to attend to.
-            hidden: Initial hidden state (model-specific).
+            input_ids: Token IDs of shape (batch_size, seq_len)
+            attention_mask: Attention mask of shape (batch_size, seq_len)
+            temperature: Temperature for sampling (higher = more random)
             
         Returns:
-            output: Tensor of token probabilities of shape [batch_size, seq_len, vocab_size].
-            hidden: Updated hidden state (model-specific).
+            Tuple of (logits, hidden_state)
         """
-        raise NotImplementedError("Forward method must be implemented by subclasses")
+        raise NotImplementedError("Subclasses must implement this method")
     
-    def _sample_next_token(self, logits: torch.Tensor, temperature: float = 1.0) -> int:
+    def _select_next_token(self, 
+                          logits: torch.Tensor, 
+                          temperature: float = 1.0) -> int:
         """
-        Sample the next token from the logits distribution.
+        Select the next token based on the logits.
         
         Args:
-            logits: Logits for the next token.
-            temperature: Temperature for sampling (1.0 means no temperature).
+            logits: Logits from the model
+            temperature: Temperature for sampling (higher = more random)
             
         Returns:
-            The sampled token id.
+            The selected token ID
         """
-        if temperature == 0.0 or temperature == 1.0:
-            # Use argmax for temperature 0 or 1
+        if temperature == 0.0:
+            # Greedy selection
             return torch.argmax(logits, dim=-1).item()
         else:
-            # Apply temperature scaling and sample
+            # Apply temperature scaling
             logits = logits / temperature
-            probs = F.softmax(logits, dim=-1)
+            # Convert to probabilities
+            probs = torch.softmax(logits, dim=-1)
+            # Sample from the distribution
             return torch.multinomial(probs, 1).item()
     
-    def set_tokenizer(self, tokenizer: SPTokenizer):
-        """Set the tokenizer for the model."""
-        self.tokenizer = tokenizer
-    
-    def prompt(
-        self,
-        prompt_text: str,
-        max_length: int = config.MAX_GEN_LENGTH,
-        temperature: float = 1.0,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ) -> str:
+    def generate(self, 
+                prompt: str, 
+                max_length: int = MAX_GENERATION_LENGTH,
+                temperature: float = TEMPERATURE) -> str:
         """
         Generate text from a prompt.
         
         Args:
-            prompt_text: The text prompt to start generation from.
-            max_length: Maximum number of tokens to generate.
-            temperature: Temperature for sampling.
-            device: Device to run the model on.
+            prompt: The input prompt
+            max_length: Maximum number of tokens to generate
+            temperature: Temperature for sampling (higher = more random)
             
         Returns:
-            The generated text.
+            The generated text
         """
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not set. Call set_tokenizer() first.")
+        self.eval()
         
-        # Move model to the specified device
-        self.to(device)
-        
-        # Tokenize the prompt
-        if prompt_text.startswith("<bos>"):
-            # Prompt already has BOS token
-            prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=False)
-        else:
-            # Add BOS token
-            prompt_tokens = [self.tokenizer.bos_id()] + self.tokenizer.encode(prompt_text, add_special_tokens=False)
-        
-        # Convert to tensor
-        input_ids = torch.tensor([prompt_tokens], dtype=torch.long).to(device)
-        
-        # Generate text
         with torch.no_grad():
-            # Initialize hidden state if necessary
+            # Check if prompt has BOS marker
+            if prompt.startswith("<bos>"):
+                prompt = prompt[5:]  # Remove <bos> tag
+                # Encode with BOS token
+                tokens = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt)
+            else:
+                # Regular encoding
+                tokens = self.tokenizer.encode(prompt)
+            
+            token_tensor = torch.tensor([tokens], device=DEVICE)
+            
+            # Generate tokens
+            generated_tokens = tokens.copy()
             hidden = None
             
-            # Track all generated tokens (including initial prompt)
-            all_tokens = input_ids.tolist()[0]
-            
-            # Keep only the last token for generation
-            curr_input = input_ids[:, -1].unsqueeze(1)
-            
-            # Generate tokens one by one
             for _ in range(max_length):
+                # Create attention mask (all 1's since we're processing all tokens)
+                attention_mask = torch.ones_like(token_tensor, dtype=torch.bool)
+                
                 # Forward pass
-                logits, hidden = self.forward(curr_input, hidden=hidden)
+                # For RNN and LSTM, we need to reuse the hidden state
+                if hidden is None:
+                    logits, hidden = self.forward(token_tensor, attention_mask, temperature)
+                else:
+                    # For subsequent tokens, we only need to feed the last generated token
+                    # but we still need to use the updated hidden state
+                    last_token = token_tensor[:, -1:]
+                    logits, hidden = self.forward(last_token, None, temperature, hidden_state=hidden)
                 
-                # Get the logits for the next token
-                next_token_logits = logits[:, -1, :]
+                # Get the next token logits (last token in the sequence)
+                next_token_logits = logits[0, -1, :]
                 
-                # Sample next token
-                next_token = self._sample_next_token(next_token_logits[0], temperature)
+                # Apply temperature and sample
+                if temperature > 0:
+                    next_token_logits = next_token_logits / temperature
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    next_token = torch.multinomial(probs, 1).item()
+                else:
+                    # Greedy sampling
+                    next_token = torch.argmax(next_token_logits).item()
                 
-                # Add to generated tokens
-                all_tokens.append(next_token)
+                # Append to the generated tokens
+                generated_tokens.append(next_token)
                 
-                # Update input for next step
-                curr_input = torch.tensor([[next_token]], dtype=torch.long).to(device)
-                
-                # Stop if EOS token is generated
-                if next_token == self.tokenizer.eos_id():
+                # Check if we've generated an EOS token
+                if next_token == self.tokenizer.eos_id:
                     break
-        
-        # Decode generated tokens
-        generated_text = self.tokenizer.decode(all_tokens)
-        
-        return generated_text
+                
+                # Update input for next iteration (add the new token)
+                token_tensor = torch.tensor([[next_token]], device=DEVICE)
+            
+            # Only decode the newly generated tokens (excluding the prompt)
+            prompt_len = len(tokens)
+            new_tokens = generated_tokens[prompt_len:]
+            
+            # Debug information
+            print(f"Generated {len(new_tokens)} new tokens")
+            if len(new_tokens) > 0:
+                print(f"First few token IDs: {new_tokens[:10]}")
+            else:
+                print("No tokens were generated")
+            
+            # Decode the generated tokens
+            generated_text = self.tokenizer.decode(new_tokens)
+            
+            # Remove EOS token from output if present
+            eos_token = self.tokenizer.id_to_token(self.tokenizer.eos_id)
+            if generated_text.endswith(eos_token):
+                generated_text = generated_text[:-len(eos_token)]
+                
+            return generated_text
     
     def save(self, path: str):
         """
-        Save the model to the specified path.
+        Save the model to disk.
         
         Args:
-            path: Path to save the model.
+            path: Path to save the model
         """
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
             'model_state_dict': self.state_dict(),
             'vocab_size': self.vocab_size,
             'embedding_dim': self.embedding_dim,
             'hidden_dim': self.hidden_dim,
-            'pad_idx': self.pad_idx,
         }, path)
-        
+        logger.info(f"Model saved to {path}")
+    
     @classmethod
-    def load(cls, path: str, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+    def load(cls, path: str, tokenizer: Tokenizer) -> 'BaseModel':
         """
-        Load the model from the specified path.
+        Load a model from disk.
         
         Args:
-            path: Path to load the model from.
-            device: Device to load the model to.
+            path: Path to load the model from
+            tokenizer: Tokenizer instance
             
         Returns:
-            The loaded model.
+            The loaded model
         """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Model file not found at {path}")
-            
-        checkpoint = torch.load(path, map_location=device)
-        
-        # Create a new model instance
+        checkpoint = torch.load(path, map_location=DEVICE)
         model = cls(
             vocab_size=checkpoint['vocab_size'],
             embedding_dim=checkpoint['embedding_dim'],
             hidden_dim=checkpoint['hidden_dim'],
-            pad_idx=checkpoint['pad_idx']
+            tokenizer=tokenizer
         )
-        
-        # Load the saved state
         model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Move to device
-        model.to(device)
-        
+        model.to(DEVICE)
+        model.eval()
+        logger.info(f"Model loaded from {path}")
         return model

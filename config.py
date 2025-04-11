@@ -1,58 +1,60 @@
 """
-Configuration file for the text generation project.
-Contains all hyperparameters and settings.
+Configuration parameters for the language modeling project.
 """
-
 import os
 from pathlib import Path
+import torch
 
-# Paths
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = os.path.join(BASE_DIR, "data")
-RAW_DATA_DIR = os.path.join(DATA_DIR, "raw")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
-PLOTS_DIR = os.path.join(BASE_DIR, "plots")
-TOKENIZER_DIR = os.path.join(BASE_DIR, "models", "tokenizer")
+# Project paths
+PROJECT_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DATA_DIR = DATA_DIR / "raw"
+MODELS_DIR = PROJECT_ROOT / "models"
+PLOTS_DIR = PROJECT_ROOT / "plots"
 
-# Data Configuration
-TRAIN_FILE = os.path.join(DATA_DIR, "train.jsonl")
-TEST_FILE = os.path.join(DATA_DIR, "test.jsonl")
+# Ensure directories exist
+for dir_path in [MODELS_DIR, PLOTS_DIR]:
+    dir_path.mkdir(exist_ok=True, parents=True)
+
+# Data processing parameters
+TOKENIZER_MODEL_PREFIX = os.path.join(DATA_DIR, "tokenizer")
 VOCAB_SIZE = 10000
 MAX_SEQ_LENGTH = 512
+TRAIN_FILE = DATA_DIR / "train.jsonl"
+TEST_FILE = DATA_DIR / "test.jsonl"
 
 # Common Model Configuration
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
 NUM_LAYERS = 2
 DROPOUT = 0.2
+TRANSFORMER_HEADS = 8
 
-# RNN Configuration
-RNN_MODEL_PATH = os.path.join(MODELS_DIR, "rnn_model.pt")
-
-# LSTM Configuration
-LSTM_MODEL_PATH = os.path.join(MODELS_DIR, "lstm_model.pt")
-
-# Transformer Configuration
-TRANSFORMER_MODEL_PATH = os.path.join(MODELS_DIR, "transformer_model.pt")
-TRANSFORMER_NHEAD = 4  # Number of attention heads
-TRANSFORMER_DIM_FEEDFORWARD = 1024  # Hidden dimension of the feedforward network
-
-# Training Configuration
+# Training parameters
 BATCH_SIZE = 128
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.01
 NUM_EPOCHS = 30
-LEARNING_RATE = 3e-4
-WEIGHT_DECAY = 1e-2
-CLIP_GRAD_NORM = 1.0
-PATIENCE = 5  # Early stopping patience
-LR_PATIENCE = 2  # Learning rate scheduler patience
-LR_FACTOR = 0.5  # Learning rate scheduler factor
-SEED = 42
+EARLY_STOPPING_PATIENCE = 3
+GRADIENT_CLIP_VAL = 1.0
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Generation Configuration
-TEMPERATURE = 1.0  # 1.0 means no temperature (just argmax)
-MAX_GEN_LENGTH = 100  # Maximum tokens to generate
+# Generation parameters
+TEMPERATURE = 0.8
+MAX_GENERATION_LENGTH = 100
 
-# Create necessary directories
-os.makedirs(MODELS_DIR, exist_ok=True)
-os.makedirs(PLOTS_DIR, exist_ok=True)
-os.makedirs(TOKENIZER_DIR, exist_ok=True)
+# Model type constants
+ALL_MODELS = 0
+RNN_MODEL = 1
+LSTM_MODEL = 2
+TRANSFORMER_MODEL = 3
+
+# Model names
+MODEL_NAMES = {
+    RNN_MODEL: "rnn_model",
+    LSTM_MODEL: "lstm_model",
+    TRANSFORMER_MODEL: "transformer_model"
+}
+
+# Evaluation metrics
+METRICS = ["perplexity", "bleu_score"]
